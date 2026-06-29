@@ -4,6 +4,20 @@
 
 O projeto Flutter agora possui plataforma Android gerada em `desktop/android`.
 
+## Dart SDK
+
+Foram configurados dois caminhos:
+
+- Dart do Flutter: `C:\flutter\bin\cache\dart-sdk`
+- Dart standalone: `C:\tools\dart-sdk`
+
+Para este aplicativo Flutter, o Android Studio deve usar o Dart do Flutter. O standalone fica disponivel para projetos Dart puros e ferramentas separadas.
+
+Versoes verificadas:
+
+- Dart do Flutter no PATH: `3.9.2`
+- Dart standalone: `3.12.2`
+
 ## Caminho do Projeto
 
 O caminho original do projeto contem acentos:
@@ -56,6 +70,17 @@ E:\Projetos\Projeto_CRM_Android\desktop
 3. Selecione o emulador Android.
 
 4. Execute `lib/main.dart`.
+
+## Configuracao no Android Studio
+
+Se o Android Studio pedir os caminhos manualmente:
+
+- Flutter SDK path: `C:\flutter`
+- Dart SDK path: `C:\flutter\bin\cache\dart-sdk`
+
+Tambem foi criada uma configuracao local de execucao no clone Android:
+
+`E:\Projetos\Projeto_CRM_Android\desktop\.idea\runConfigurations\main_dart.xml`
 
 ## Login de Desenvolvimento
 
