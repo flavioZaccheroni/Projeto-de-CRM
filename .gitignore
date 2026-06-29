@@ -36,6 +36,7 @@ pnpm-debug.log*
 bin/
 obj/
 TestResults/
+backend/published-api/
 
 # Banco de dados local e backups
 *.db

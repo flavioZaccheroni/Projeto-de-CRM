@@ -37,4 +37,5 @@ O script usa UUIDs e a extensao `uuid-ossp`. Em ambientes onde essa extensao nao
 ## Scripts Aplicados na Fase 0
 
 - `migrations/001_initial_schema.sql`
+- `migrations/002_phase1_development_passwords.sql`
 - `seed/001_sample_data.sql`
