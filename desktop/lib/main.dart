@@ -28,11 +28,19 @@ class AutoPartsCrmApp extends StatelessWidget {
 }
 
 class ApiClient {
-  ApiClient({this.baseUrl = 'http://localhost:5026'});
+  ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? _defaultBaseUrl();
 
   final String baseUrl;
   final HttpClient _client = HttpClient()
     ..badCertificateCallback = (_, _, _) => true;
+
+  static String _defaultBaseUrl() {
+    if (Platform.isAndroid) {
+      return 'http://10.0.2.2:5026';
+    }
+
+    return 'http://localhost:5026';
+  }
 
   Future<Map<String, dynamic>> getMap(String path) async {
     final data = await _request('GET', path);

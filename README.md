@@ -19,6 +19,7 @@ O sistema deve organizar o fluxo de informacoes entre setores, reduzir retrabalh
 - [Modelo de dados inicial](docs/arquitetura/modelo-dados-inicial.md)
 - [Modelo de servidor](docs/arquitetura/modelo-servidor.md)
 - [Ambiente de desenvolvimento](docs/desenvolvimento/ambiente-desenvolvimento.md)
+- [Android Studio](docs/desenvolvimento/android-studio.md)
 - [Padroes de desenvolvimento](docs/desenvolvimento/padroes.md)
 - [Fases do projeto](docs/planejamento/fases.md)
 - [Status da Fase 1](docs/planejamento/fase-1-status.md)
