@@ -259,6 +259,9 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     final pages = [
       DashboardPage(api: widget.api),
+      InteractionsPage(api: widget.api, session: widget.session),
+      QuotationsPage(api: widget.api, session: widget.session),
+      SalesOrdersPage(api: widget.api, session: widget.session),
       UsersPage(api: widget.api, session: widget.session),
       CustomersPage(api: widget.api, session: widget.session),
       VehiclesPage(api: widget.api, session: widget.session),
@@ -279,6 +282,21 @@ class _HomeShellState extends State<HomeShell> {
                 icon: Icon(Icons.dashboard_outlined),
                 selectedIcon: Icon(Icons.dashboard),
                 label: Text('Painel'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.support_agent_outlined),
+                selectedIcon: Icon(Icons.support_agent),
+                label: Text('Atendimento'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.request_quote_outlined),
+                selectedIcon: Icon(Icons.request_quote),
+                label: Text('Orcamentos'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.shopping_cart_outlined),
+                selectedIcon: Icon(Icons.shopping_cart),
+                label: Text('Pedidos'),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.manage_accounts_outlined),
@@ -375,6 +393,21 @@ class DashboardPage extends StatelessWidget {
               icon: Icons.build,
             ),
             SummaryCard(
+              title: 'Atendimentos',
+              value: '${data['interactions']}',
+              icon: Icons.support_agent,
+            ),
+            SummaryCard(
+              title: 'Orcamentos',
+              value: '${data['quotations']}',
+              icon: Icons.request_quote,
+            ),
+            SummaryCard(
+              title: 'Pedidos',
+              value: '${data['salesOrders']}',
+              icon: Icons.shopping_cart,
+            ),
+            SummaryCard(
               title: 'Ordens abertas',
               value: '${data['openOrders']}',
               icon: Icons.car_repair,
@@ -383,6 +416,241 @@ class DashboardPage extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class InteractionsPage extends StatefulWidget {
+  const InteractionsPage({required this.api, required this.session, super.key});
+
+  final ApiClient api;
+  final Session session;
+
+  @override
+  State<InteractionsPage> createState() => _InteractionsPageState();
+}
+
+class _InteractionsPageState extends State<InteractionsPage> {
+  int _reload = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return DataFuture(
+      key: ValueKey(_reload),
+      future: widget.api.getList('/api/customer-interactions'),
+      builder: (context, interactions) => PageScaffold(
+        title: 'Atendimento',
+        action: FilledButton.icon(
+          onPressed: () => _showInteractionDialog(context),
+          icon: const Icon(Icons.add),
+          label: const Text('Novo atendimento'),
+        ),
+        child: EntityTable(
+          columns: const [
+            'Cliente',
+            'Tipo',
+            'Assunto',
+            'Status',
+            'Usuario',
+            'Data',
+          ],
+          rows: [
+            for (final item in interactions.cast<Map<String, dynamic>>())
+              [
+                item['customerName'],
+                interactionLabel(item['interactionType'] as String?),
+                item['subject'],
+                statusLabel(item['status'] as String?),
+                item['userName'],
+                item['createdAt'],
+              ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showInteractionDialog(BuildContext context) async {
+    final customers = (await widget.api.getList(
+      '/api/customers',
+    )).cast<Map<String, dynamic>>();
+    if (!context.mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => InteractionDialog(
+        api: widget.api,
+        session: widget.session,
+        customers: customers,
+      ),
+    );
+
+    if (saved == true) {
+      setState(() => _reload++);
+    }
+  }
+}
+
+class QuotationsPage extends StatefulWidget {
+  const QuotationsPage({required this.api, required this.session, super.key});
+
+  final ApiClient api;
+  final Session session;
+
+  @override
+  State<QuotationsPage> createState() => _QuotationsPageState();
+}
+
+class _QuotationsPageState extends State<QuotationsPage> {
+  int _reload = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return DataFuture(
+      key: ValueKey(_reload),
+      future: widget.api.getList('/api/quotations'),
+      builder: (context, quotations) => PageScaffold(
+        title: 'Orcamentos',
+        action: FilledButton.icon(
+          onPressed: () => _showCommercialDialog(context),
+          icon: const Icon(Icons.add),
+          label: const Text('Novo orcamento'),
+        ),
+        child: EntityTable(
+          columns: const [
+            'Cliente',
+            'Veiculo',
+            'Status',
+            'Itens',
+            'Total',
+            'Data',
+          ],
+          rows: [
+            for (final quote in quotations.cast<Map<String, dynamic>>())
+              [
+                quote['customerName'],
+                quote['vehiclePlate'],
+                statusLabel(quote['status'] as String?),
+                quote['itemsCount'],
+                "R\$ ${quote['totalAmount']}",
+                quote['createdAt'],
+              ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showCommercialDialog(BuildContext context) async {
+    final customers = (await widget.api.getList(
+      '/api/customers',
+    )).cast<Map<String, dynamic>>();
+    final vehicles = (await widget.api.getList(
+      '/api/vehicles',
+    )).cast<Map<String, dynamic>>();
+    final products = (await widget.api.getList(
+      '/api/products',
+    )).cast<Map<String, dynamic>>();
+    final services = (await widget.api.getList(
+      '/api/services',
+    )).cast<Map<String, dynamic>>();
+    if (!context.mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => CommercialDocumentDialog(
+        api: widget.api,
+        session: widget.session,
+        title: 'Novo orcamento',
+        endpoint: '/api/quotations',
+        customers: customers,
+        vehicles: vehicles,
+        products: products,
+        services: services,
+      ),
+    );
+
+    if (saved == true) {
+      setState(() => _reload++);
+    }
+  }
+}
+
+class SalesOrdersPage extends StatefulWidget {
+  const SalesOrdersPage({required this.api, required this.session, super.key});
+
+  final ApiClient api;
+  final Session session;
+
+  @override
+  State<SalesOrdersPage> createState() => _SalesOrdersPageState();
+}
+
+class _SalesOrdersPageState extends State<SalesOrdersPage> {
+  int _reload = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return DataFuture(
+      key: ValueKey(_reload),
+      future: widget.api.getList('/api/sales-orders'),
+      builder: (context, orders) => PageScaffold(
+        title: 'Pedidos de venda',
+        action: FilledButton.icon(
+          onPressed: () => _showCommercialDialog(context),
+          icon: const Icon(Icons.add),
+          label: const Text('Novo pedido'),
+        ),
+        child: EntityTable(
+          columns: const [
+            'Cliente',
+            'Status',
+            'Itens',
+            'Produtos',
+            'Servicos',
+            'Total',
+          ],
+          rows: [
+            for (final order in orders.cast<Map<String, dynamic>>())
+              [
+                order['customerName'],
+                statusLabel(order['status'] as String?),
+                order['itemsCount'],
+                "R\$ ${order['totalProducts']}",
+                "R\$ ${order['totalServices']}",
+                "R\$ ${order['totalAmount']}",
+              ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showCommercialDialog(BuildContext context) async {
+    final customers = (await widget.api.getList(
+      '/api/customers',
+    )).cast<Map<String, dynamic>>();
+    final products = (await widget.api.getList(
+      '/api/products',
+    )).cast<Map<String, dynamic>>();
+    final services = (await widget.api.getList(
+      '/api/services',
+    )).cast<Map<String, dynamic>>();
+    if (!context.mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => CommercialDocumentDialog(
+        api: widget.api,
+        session: widget.session,
+        title: 'Novo pedido',
+        endpoint: '/api/sales-orders',
+        customers: customers,
+        vehicles: const [],
+        products: products,
+        services: services,
+      ),
+    );
+
+    if (saved == true) {
+      setState(() => _reload++);
+    }
   }
 }
 
@@ -851,6 +1119,284 @@ class SummaryCard extends StatelessWidget {
   }
 }
 
+class InteractionDialog extends StatefulWidget {
+  const InteractionDialog({
+    required this.api,
+    required this.session,
+    required this.customers,
+    super.key,
+  });
+
+  final ApiClient api;
+  final Session session;
+  final List<Map<String, dynamic>> customers;
+
+  @override
+  State<InteractionDialog> createState() => _InteractionDialogState();
+}
+
+class _InteractionDialogState extends State<InteractionDialog> {
+  final _subject = TextEditingController();
+  final _description = TextEditingController();
+  String? _customerId;
+  String _type = 'whatsapp';
+  String _status = 'open';
+
+  @override
+  void initState() {
+    super.initState();
+    _customerId = widget.customers.isEmpty
+        ? null
+        : widget.customers.first['id'] as String;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FormDialog(
+      title: 'Novo atendimento',
+      fields: [
+        DropdownButtonFormField<String>(
+          initialValue: _customerId,
+          items: [
+            for (final customer in widget.customers)
+              DropdownMenuItem(
+                value: customer['id'] as String,
+                child: Text(customer['name'] as String),
+              ),
+          ],
+          onChanged: (value) => setState(() => _customerId = value),
+          decoration: const InputDecoration(labelText: 'Cliente'),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _type,
+          items: const [
+            DropdownMenuItem(value: 'call', child: Text('Ligacao')),
+            DropdownMenuItem(value: 'whatsapp', child: Text('WhatsApp')),
+            DropdownMenuItem(value: 'email', child: Text('Email')),
+            DropdownMenuItem(value: 'visit', child: Text('Visita')),
+            DropdownMenuItem(value: 'counter', child: Text('Balcao')),
+            DropdownMenuItem(value: 'other', child: Text('Outro')),
+          ],
+          onChanged: (value) => setState(() => _type = value ?? 'other'),
+          decoration: const InputDecoration(labelText: 'Tipo'),
+        ),
+        TextField(
+          controller: _subject,
+          decoration: const InputDecoration(labelText: 'Assunto'),
+        ),
+        TextField(
+          controller: _description,
+          decoration: const InputDecoration(labelText: 'Descricao'),
+          minLines: 2,
+          maxLines: 4,
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _status,
+          items: const [
+            DropdownMenuItem(value: 'open', child: Text('Aberto')),
+            DropdownMenuItem(value: 'done', child: Text('Concluido')),
+            DropdownMenuItem(value: 'cancelled', child: Text('Cancelado')),
+          ],
+          onChanged: (value) => setState(() => _status = value ?? 'open'),
+          decoration: const InputDecoration(labelText: 'Status'),
+        ),
+      ],
+      onSave: () => widget.api.post('/api/customer-interactions', {
+        'customerId': _customerId,
+        'userId': widget.session.userId,
+        'interactionType': _type,
+        'subject': _subject.text,
+        'description': _description.text,
+        'status': _status,
+      }),
+    );
+  }
+}
+
+class CommercialDocumentDialog extends StatefulWidget {
+  const CommercialDocumentDialog({
+    required this.api,
+    required this.session,
+    required this.title,
+    required this.endpoint,
+    required this.customers,
+    required this.vehicles,
+    required this.products,
+    required this.services,
+    super.key,
+  });
+
+  final ApiClient api;
+  final Session session;
+  final String title;
+  final String endpoint;
+  final List<Map<String, dynamic>> customers;
+  final List<Map<String, dynamic>> vehicles;
+  final List<Map<String, dynamic>> products;
+  final List<Map<String, dynamic>> services;
+
+  @override
+  State<CommercialDocumentDialog> createState() =>
+      _CommercialDocumentDialogState();
+}
+
+class _CommercialDocumentDialogState extends State<CommercialDocumentDialog> {
+  final _notes = TextEditingController();
+  final _quantity = TextEditingController(text: '1');
+  final _unitPrice = TextEditingController(text: '0');
+  String? _customerId;
+  String? _vehicleId;
+  String _itemType = 'product';
+  String? _itemId;
+
+  @override
+  void initState() {
+    super.initState();
+    _customerId = widget.customers.isEmpty
+        ? null
+        : widget.customers.first['id'] as String;
+    _vehicleId = widget.vehicles.isEmpty
+        ? null
+        : widget.vehicles.first['id'] as String;
+    _itemId = widget.products.isEmpty
+        ? null
+        : widget.products.first['id'] as String;
+    _syncPrice();
+  }
+
+  void _syncPrice() {
+    final selected = _selectedItem();
+    if (selected == null) return;
+
+    final price = _itemType == 'product'
+        ? selected['salePrice']
+        : selected['standardPrice'];
+    _unitPrice.text = '$price';
+  }
+
+  Map<String, dynamic>? _selectedItem() {
+    final source = _itemType == 'product' ? widget.products : widget.services;
+    for (final item in source) {
+      if (item['id'] == _itemId) {
+        return item;
+      }
+    }
+
+    return source.isEmpty ? null : source.first;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final availableItems = _itemType == 'product'
+        ? widget.products
+        : widget.services;
+
+    return FormDialog(
+      title: widget.title,
+      fields: [
+        DropdownButtonFormField<String>(
+          initialValue: _customerId,
+          items: [
+            for (final customer in widget.customers)
+              DropdownMenuItem(
+                value: customer['id'] as String,
+                child: Text(customer['name'] as String),
+              ),
+          ],
+          onChanged: (value) => setState(() => _customerId = value),
+          decoration: const InputDecoration(labelText: 'Cliente'),
+        ),
+        if (widget.vehicles.isNotEmpty)
+          DropdownButtonFormField<String>(
+            initialValue: _vehicleId,
+            items: [
+              for (final vehicle in widget.vehicles)
+                DropdownMenuItem(
+                  value: vehicle['id'] as String,
+                  child: Text(
+                    '${vehicle['customerName']} - ${vehicle['plate']}',
+                  ),
+                ),
+            ],
+            onChanged: (value) => setState(() => _vehicleId = value),
+            decoration: const InputDecoration(labelText: 'Veiculo'),
+          ),
+        DropdownButtonFormField<String>(
+          initialValue: _itemType,
+          items: const [
+            DropdownMenuItem(value: 'product', child: Text('Produto')),
+            DropdownMenuItem(value: 'service', child: Text('Servico')),
+          ],
+          onChanged: (value) {
+            setState(() {
+              _itemType = value ?? 'product';
+              final source = _itemType == 'product'
+                  ? widget.products
+                  : widget.services;
+              _itemId = source.isEmpty ? null : source.first['id'] as String;
+              _syncPrice();
+            });
+          },
+          decoration: const InputDecoration(labelText: 'Tipo de item'),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _itemId,
+          items: [
+            for (final item in availableItems)
+              DropdownMenuItem(
+                value: item['id'] as String,
+                child: Text(item['name'] as String),
+              ),
+          ],
+          onChanged: (value) {
+            setState(() {
+              _itemId = value;
+              _syncPrice();
+            });
+          },
+          decoration: const InputDecoration(labelText: 'Item'),
+        ),
+        TextField(
+          controller: _quantity,
+          decoration: const InputDecoration(labelText: 'Quantidade'),
+        ),
+        TextField(
+          controller: _unitPrice,
+          decoration: const InputDecoration(labelText: 'Preco unitario'),
+        ),
+        TextField(
+          controller: _notes,
+          decoration: const InputDecoration(labelText: 'Observacoes'),
+          minLines: 2,
+          maxLines: 4,
+        ),
+      ],
+      onSave: () {
+        final selected = _selectedItem();
+        return widget.api.post(widget.endpoint, {
+          'customerId': _customerId,
+          'vehicleId': widget.endpoint == '/api/quotations' ? _vehicleId : null,
+          'quotationId': null,
+          'userId': widget.session.userId,
+          'notes': _notes.text,
+          'items': [
+            {
+              'itemType': _itemType,
+              'productId': _itemType == 'product' ? _itemId : null,
+              'serviceId': _itemType == 'service' ? _itemId : null,
+              'description': selected == null
+                  ? 'Item comercial'
+                  : selected['name'],
+              'quantity': decimal(_quantity.text),
+              'unitPrice': decimal(_unitPrice.text),
+            },
+          ],
+        });
+      },
+    );
+  }
+}
+
 class UserDialog extends StatefulWidget {
   const UserDialog({required this.api, required this.roles, super.key});
 
@@ -1221,4 +1767,32 @@ class _FormDialogState extends State<FormDialog> {
 
 double decimal(String value) {
   return double.tryParse(value.replaceAll(',', '.')) ?? 0;
+}
+
+String interactionLabel(String? value) {
+  return switch (value) {
+    'call' => 'Ligacao',
+    'whatsapp' => 'WhatsApp',
+    'email' => 'Email',
+    'visit' => 'Visita',
+    'counter' => 'Balcao',
+    'other' => 'Outro',
+    _ => value ?? '',
+  };
+}
+
+String statusLabel(String? value) {
+  return switch (value) {
+    'open' => 'Aberto',
+    'done' => 'Concluido',
+    'cancelled' => 'Cancelado',
+    'draft' => 'Rascunho',
+    'sent' => 'Enviado',
+    'approved' => 'Aprovado',
+    'rejected' => 'Rejeitado',
+    'expired' => 'Vencido',
+    'confirmed' => 'Confirmado',
+    'invoiced' => 'Faturado',
+    _ => value ?? '',
+  };
 }

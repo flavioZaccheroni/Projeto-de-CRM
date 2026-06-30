@@ -91,8 +91,11 @@ app.MapGet("/api/dashboard", async (NpgsqlDataSource db) =>
     var services = await Count(db, "services");
     var openOrders = await Count(db, "work_orders", "status <> 'completed' and status <> 'cancelled'");
     var users = await Count(db, "users");
+    var quotations = await Count(db, "quotations");
+    var interactions = await Count(db, "customer_interactions");
+    var salesOrders = await Count(db, "sales_orders");
 
-    return Results.Ok(new DashboardDto(customers, products, services, openOrders, users));
+    return Results.Ok(new DashboardDto(customers, products, services, openOrders, users, quotations, interactions, salesOrders));
 });
 
 app.MapGet("/api/roles", async (NpgsqlDataSource db) =>
@@ -352,6 +355,225 @@ app.MapPost("/api/services", async (CreateServiceRequest request, NpgsqlDataSour
     return Results.Created($"/api/services/{id}", new { id });
 });
 
+app.MapGet("/api/customer-interactions", async (NpgsqlDataSource db) =>
+{
+    const string sql = """
+        select i.id, i.customer_id, c.name, coalesce(u.full_name, 'Sistema'),
+               i.interaction_type, i.subject, coalesce(i.description, ''),
+               i.status, i.next_contact_at, i.created_at
+        from customer_interactions i
+        join customers c on c.id = i.customer_id
+        left join users u on u.id = i.user_id
+        order by i.created_at desc
+        """;
+
+    return Results.Ok(await Query(db, sql, reader => new CustomerInteractionDto(
+        reader.GetGuid(0),
+        reader.GetGuid(1),
+        reader.GetString(2),
+        reader.GetString(3),
+        reader.GetString(4),
+        reader.GetString(5),
+        reader.GetString(6),
+        reader.GetString(7),
+        reader.IsDBNull(8) ? null : reader.GetFieldValue<DateTimeOffset>(8),
+        reader.GetFieldValue<DateTimeOffset>(9)
+    )));
+});
+
+app.MapPost("/api/customer-interactions", async (CreateCustomerInteractionRequest request, NpgsqlDataSource db) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Subject))
+    {
+        return Results.BadRequest(new { message = "Assunto do atendimento e obrigatorio." });
+    }
+
+    const string sql = """
+        insert into customer_interactions (customer_id, user_id, interaction_type, subject, description, status, next_contact_at)
+        values (@customerId, @userId, @type, @subject, @description, @status, @nextContactAt)
+        returning id
+        """;
+
+    await using var command = db.CreateCommand(sql);
+    command.Parameters.AddWithValue("customerId", request.CustomerId);
+    command.Parameters.AddWithValue("userId", request.UserId is null ? DBNull.Value : request.UserId);
+    command.Parameters.AddWithValue("type", string.IsNullOrWhiteSpace(request.InteractionType) ? "other" : request.InteractionType.Trim());
+    command.Parameters.AddWithValue("subject", request.Subject.Trim());
+    command.Parameters.AddWithValue("description", DbValue(request.Description));
+    command.Parameters.AddWithValue("status", string.IsNullOrWhiteSpace(request.Status) ? "open" : request.Status.Trim());
+    command.Parameters.AddWithValue("nextContactAt", request.NextContactAt is null ? DBNull.Value : request.NextContactAt);
+
+    var id = (Guid)(await command.ExecuteScalarAsync() ?? Guid.Empty);
+    await InsertAudit(db, request.UserId, "customer_interactions", id, "created", request);
+
+    return Results.Created($"/api/customer-interactions/{id}", new { id });
+});
+
+app.MapGet("/api/quotations", async (NpgsqlDataSource db) =>
+{
+    const string sql = """
+        select q.id, q.customer_id, c.name, q.vehicle_id, coalesce(v.plate, ''),
+               q.status, coalesce(q.notes, ''), q.total_products, q.total_services,
+               q.total_amount, q.created_at, count(qi.id)::int
+        from quotations q
+        join customers c on c.id = q.customer_id
+        left join vehicles v on v.id = q.vehicle_id
+        left join quotation_items qi on qi.quotation_id = q.id
+        group by q.id, c.name, v.plate
+        order by q.created_at desc
+        """;
+
+    return Results.Ok(await Query(db, sql, reader => new QuotationDto(
+        reader.GetGuid(0),
+        reader.GetGuid(1),
+        reader.GetString(2),
+        reader.IsDBNull(3) ? null : reader.GetGuid(3),
+        reader.GetString(4),
+        reader.GetString(5),
+        reader.GetString(6),
+        reader.GetDecimal(7),
+        reader.GetDecimal(8),
+        reader.GetDecimal(9),
+        reader.GetFieldValue<DateTimeOffset>(10),
+        reader.GetInt32(11)
+    )));
+});
+
+app.MapPost("/api/quotations", async (CreateQuotationRequest request, NpgsqlDataSource db) =>
+{
+    if (request.Items.Count == 0)
+    {
+        return Results.BadRequest(new { message = "O orcamento precisa ter pelo menos um item." });
+    }
+
+    var totals = CalculateTotals(request.Items);
+    await using var connection = await db.OpenConnectionAsync();
+    await using var transaction = await connection.BeginTransactionAsync();
+
+    await using var command = new NpgsqlCommand("""
+        insert into quotations (customer_id, vehicle_id, created_by_user_id, status, notes, total_products, total_services, total_amount)
+        values (@customerId, @vehicleId, @userId, 'draft', @notes, @totalProducts, @totalServices, @totalAmount)
+        returning id
+        """, connection, transaction);
+    command.Parameters.AddWithValue("customerId", request.CustomerId);
+    command.Parameters.AddWithValue("vehicleId", request.VehicleId is null ? DBNull.Value : request.VehicleId);
+    command.Parameters.AddWithValue("userId", request.UserId ?? throw new InvalidOperationException("Usuario obrigatorio."));
+    command.Parameters.AddWithValue("notes", DbValue(request.Notes));
+    command.Parameters.AddWithValue("totalProducts", totals.Products);
+    command.Parameters.AddWithValue("totalServices", totals.Services);
+    command.Parameters.AddWithValue("totalAmount", totals.Amount);
+
+    var id = (Guid)(await command.ExecuteScalarAsync() ?? Guid.Empty);
+
+    foreach (var item in request.Items)
+    {
+        await InsertCommercialItem(connection, transaction, "quotation_items", "quotation_id", id, item);
+    }
+
+    await transaction.CommitAsync();
+    await InsertAudit(db, request.UserId, "quotations", id, "created", request);
+
+    return Results.Created($"/api/quotations/{id}", new { id });
+});
+
+app.MapPost("/api/quotations/{id:guid}/status", async (Guid id, UpdateStatusRequest request, NpgsqlDataSource db) =>
+{
+    const string sql = "update quotations set status = @status, updated_at = now() where id = @id";
+    await using var command = db.CreateCommand(sql);
+    command.Parameters.AddWithValue("id", id);
+    command.Parameters.AddWithValue("status", request.Status.Trim());
+    var rows = await command.ExecuteNonQueryAsync();
+
+    if (rows == 0)
+    {
+        return Results.NotFound();
+    }
+
+    await InsertAudit(db, request.UserId, "quotations", id, "status_updated", request);
+    return Results.Ok(new { id, request.Status });
+});
+
+app.MapGet("/api/sales-orders", async (NpgsqlDataSource db) =>
+{
+    const string sql = """
+        select s.id, s.customer_id, c.name, s.quotation_id, s.status, coalesce(s.notes, ''),
+               s.total_products, s.total_services, s.total_amount, s.created_at, count(si.id)::int
+        from sales_orders s
+        join customers c on c.id = s.customer_id
+        left join sales_order_items si on si.sales_order_id = s.id
+        group by s.id, c.name
+        order by s.created_at desc
+        """;
+
+    return Results.Ok(await Query(db, sql, reader => new SalesOrderDto(
+        reader.GetGuid(0),
+        reader.GetGuid(1),
+        reader.GetString(2),
+        reader.IsDBNull(3) ? null : reader.GetGuid(3),
+        reader.GetString(4),
+        reader.GetString(5),
+        reader.GetDecimal(6),
+        reader.GetDecimal(7),
+        reader.GetDecimal(8),
+        reader.GetFieldValue<DateTimeOffset>(9),
+        reader.GetInt32(10)
+    )));
+});
+
+app.MapPost("/api/sales-orders", async (CreateSalesOrderRequest request, NpgsqlDataSource db) =>
+{
+    if (request.Items.Count == 0)
+    {
+        return Results.BadRequest(new { message = "O pedido precisa ter pelo menos um item." });
+    }
+
+    var totals = CalculateTotals(request.Items);
+    await using var connection = await db.OpenConnectionAsync();
+    await using var transaction = await connection.BeginTransactionAsync();
+
+    await using var command = new NpgsqlCommand("""
+        insert into sales_orders (customer_id, quotation_id, created_by_user_id, status, notes, total_products, total_services, total_amount)
+        values (@customerId, @quotationId, @userId, 'draft', @notes, @totalProducts, @totalServices, @totalAmount)
+        returning id
+        """, connection, transaction);
+    command.Parameters.AddWithValue("customerId", request.CustomerId);
+    command.Parameters.AddWithValue("quotationId", request.QuotationId is null ? DBNull.Value : request.QuotationId);
+    command.Parameters.AddWithValue("userId", request.UserId ?? throw new InvalidOperationException("Usuario obrigatorio."));
+    command.Parameters.AddWithValue("notes", DbValue(request.Notes));
+    command.Parameters.AddWithValue("totalProducts", totals.Products);
+    command.Parameters.AddWithValue("totalServices", totals.Services);
+    command.Parameters.AddWithValue("totalAmount", totals.Amount);
+
+    var id = (Guid)(await command.ExecuteScalarAsync() ?? Guid.Empty);
+
+    foreach (var item in request.Items)
+    {
+        await InsertCommercialItem(connection, transaction, "sales_order_items", "sales_order_id", id, item);
+    }
+
+    await transaction.CommitAsync();
+    await InsertAudit(db, request.UserId, "sales_orders", id, "created", request);
+
+    return Results.Created($"/api/sales-orders/{id}", new { id });
+});
+
+app.MapPost("/api/sales-orders/{id:guid}/status", async (Guid id, UpdateStatusRequest request, NpgsqlDataSource db) =>
+{
+    const string sql = "update sales_orders set status = @status, updated_at = now() where id = @id";
+    await using var command = db.CreateCommand(sql);
+    command.Parameters.AddWithValue("id", id);
+    command.Parameters.AddWithValue("status", request.Status.Trim());
+    var rows = await command.ExecuteNonQueryAsync();
+
+    if (rows == 0)
+    {
+        return Results.NotFound();
+    }
+
+    await InsertAudit(db, request.UserId, "sales_orders", id, "status_updated", request);
+    return Results.Ok(new { id, request.Status });
+});
+
 app.MapGet("/api/audit-logs", async (NpgsqlDataSource db) =>
 {
     const string sql = """
@@ -440,6 +662,61 @@ static async Task InsertAudit(NpgsqlDataSource db, Guid? userId, string entityNa
     await command.ExecuteNonQueryAsync();
 }
 
+static CommercialTotals CalculateTotals(List<CommercialItemRequest> items)
+{
+    decimal products = 0;
+    decimal services = 0;
+
+    foreach (var item in items)
+    {
+        var total = item.Quantity * item.UnitPrice;
+        if (item.ItemType == "product")
+        {
+            products += total;
+        }
+        else if (item.ItemType == "service")
+        {
+            services += total;
+        }
+    }
+
+    return new CommercialTotals(products, services, products + services);
+}
+
+static async Task InsertCommercialItem(
+    NpgsqlConnection connection,
+    NpgsqlTransaction transaction,
+    string tableName,
+    string parentColumnName,
+    Guid parentId,
+    CommercialItemRequest item)
+{
+    if (item.Quantity <= 0)
+    {
+        throw new InvalidOperationException("Quantidade do item deve ser maior que zero.");
+    }
+
+    if (item.UnitPrice < 0)
+    {
+        throw new InvalidOperationException("Preco do item nao pode ser negativo.");
+    }
+
+    await using var command = new NpgsqlCommand($"""
+        insert into {tableName} ({parentColumnName}, item_type, product_id, service_id, description, quantity, unit_price, total_amount)
+        values (@parentId, @itemType, @productId, @serviceId, @description, @quantity, @unitPrice, @totalAmount)
+        """, connection, transaction);
+
+    command.Parameters.AddWithValue("parentId", parentId);
+    command.Parameters.AddWithValue("itemType", item.ItemType);
+    command.Parameters.AddWithValue("productId", item.ProductId is null ? DBNull.Value : item.ProductId);
+    command.Parameters.AddWithValue("serviceId", item.ServiceId is null ? DBNull.Value : item.ServiceId);
+    command.Parameters.AddWithValue("description", item.Description.Trim());
+    command.Parameters.AddWithValue("quantity", item.Quantity);
+    command.Parameters.AddWithValue("unitPrice", item.UnitPrice);
+    command.Parameters.AddWithValue("totalAmount", item.Quantity * item.UnitPrice);
+    await command.ExecuteNonQueryAsync();
+}
+
 static object DbValue(string? value) => string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();
 
 static bool VerifyDevelopmentPassword(string storedHash, string password)
@@ -455,7 +732,7 @@ static bool VerifyDevelopmentPassword(string storedHash, string password)
 record LoginRequest(string Email, string Password);
 record LoginResponse(string Token, CurrentUserDto User);
 record CurrentUserDto(Guid Id, string FullName, string Email, string RoleName, List<string> Permissions);
-record DashboardDto(int Customers, int Products, int Services, int OpenOrders, int Users);
+record DashboardDto(int Customers, int Products, int Services, int OpenOrders, int Users, int Quotations, int Interactions, int SalesOrders);
 record RoleDto(Guid Id, string Name, string Description);
 record PermissionDto(Guid Id, string Code, string Description);
 record UserDto(Guid Id, string FullName, string Email, bool IsActive, Guid RoleId, string RoleName);
@@ -468,6 +745,15 @@ record ProductDto(Guid Id, string Sku, string Name, string Unit, decimal SalePri
 record CreateProductRequest(string Sku, string Name, string? Description, string? Unit, decimal SalePrice, decimal CostPrice, decimal MinimumStock, decimal InitialStock, Guid? UserId);
 record ServiceDto(Guid Id, string Code, string Name, string Description, decimal StandardPrice, int? EstimatedMinutes, bool IsActive);
 record CreateServiceRequest(string Code, string Name, string? Description, decimal StandardPrice, int? EstimatedMinutes, Guid? UserId);
+record CustomerInteractionDto(Guid Id, Guid CustomerId, string CustomerName, string UserName, string InteractionType, string Subject, string Description, string Status, DateTimeOffset? NextContactAt, DateTimeOffset CreatedAt);
+record CreateCustomerInteractionRequest(Guid CustomerId, Guid? UserId, string InteractionType, string Subject, string? Description, string Status, DateTimeOffset? NextContactAt);
+record CommercialItemRequest(string ItemType, Guid? ProductId, Guid? ServiceId, string Description, decimal Quantity, decimal UnitPrice);
+record CommercialTotals(decimal Products, decimal Services, decimal Amount);
+record QuotationDto(Guid Id, Guid CustomerId, string CustomerName, Guid? VehicleId, string VehiclePlate, string Status, string Notes, decimal TotalProducts, decimal TotalServices, decimal TotalAmount, DateTimeOffset CreatedAt, int ItemsCount);
+record CreateQuotationRequest(Guid CustomerId, Guid? VehicleId, Guid? UserId, string? Notes, List<CommercialItemRequest> Items);
+record SalesOrderDto(Guid Id, Guid CustomerId, string CustomerName, Guid? QuotationId, string Status, string Notes, decimal TotalProducts, decimal TotalServices, decimal TotalAmount, DateTimeOffset CreatedAt, int ItemsCount);
+record CreateSalesOrderRequest(Guid CustomerId, Guid? QuotationId, Guid? UserId, string? Notes, List<CommercialItemRequest> Items);
+record UpdateStatusRequest(string Status, Guid? UserId);
 record AuditLogDto(Guid Id, string UserName, string EntityName, Guid? EntityId, string Action, DateTimeOffset CreatedAt);
 
 public partial class Program;

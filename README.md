@@ -23,6 +23,7 @@ O sistema deve organizar o fluxo de informacoes entre setores, reduzir retrabalh
 - [Padroes de desenvolvimento](docs/desenvolvimento/padroes.md)
 - [Fases do projeto](docs/planejamento/fases.md)
 - [Status da Fase 1](docs/planejamento/fase-1-status.md)
+- [Status da Fase 2](docs/planejamento/fase-2-status.md)
 - [Proximos passos](docs/planejamento/proximos-passos.md)
 - [Massa de testes do MVP](docs/planejamento/massa-testes-mvp.md)
 

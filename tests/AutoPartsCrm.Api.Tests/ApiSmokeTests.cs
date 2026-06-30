@@ -46,4 +46,15 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("dev-session", body);
     }
+
+    [Theory]
+    [InlineData("/api/customer-interactions")]
+    [InlineData("/api/quotations")]
+    [InlineData("/api/sales-orders")]
+    public async Task CommercialEndpoints_ReturnOk(string endpoint)
+    {
+        var response = await _client.GetAsync(endpoint);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
 }
