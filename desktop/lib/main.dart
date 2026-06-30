@@ -33,6 +33,7 @@ class ApiClient {
   final String baseUrl;
   final HttpClient _client = HttpClient()
     ..badCertificateCallback = (_, _, _) => true;
+  static Process? _localBackend;
 
   static String _defaultBaseUrl() {
     if (Platform.isAndroid) {
@@ -40,6 +41,104 @@ class ApiClient {
     }
 
     return 'http://localhost:5026';
+  }
+
+  Future<void> ensureAvailable() async {
+    var lastError = await _probeHealth();
+    if (lastError == null) {
+      return;
+    }
+
+    if (!_canStartLocalBackend) {
+      throw ApiConnectionException(
+        'A API nao respondeu em $baseUrl. Abra a API antes de entrar no app.',
+      );
+    }
+
+    await _startLocalBackend();
+
+    for (var attempt = 0; attempt < 25; attempt++) {
+      await Future<void>.delayed(const Duration(seconds: 1));
+      lastError = await _probeHealth();
+      if (lastError == null) {
+        return;
+      }
+    }
+
+    throw ApiConnectionException(
+      'A API foi iniciada, mas nao ficou pronta. Verifique se o PostgreSQL '
+      'esta aberto e se o banco autoparts_crm_dev existe. Ultimo erro: '
+      '$lastError',
+    );
+  }
+
+  bool get _canStartLocalBackend {
+    final isLocalhost =
+        baseUrl.contains('localhost') || baseUrl.contains('127.0.0.1');
+    return isLocalhost && !Platform.isAndroid && !Platform.isIOS;
+  }
+
+  Future<String?> _probeHealth() async {
+    try {
+      final uri = Uri.parse('$baseUrl/health');
+      final request = await _client
+          .getUrl(uri)
+          .timeout(const Duration(seconds: 2));
+      final response = await request.close().timeout(
+        const Duration(seconds: 3),
+      );
+      await response.drain<void>();
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return null;
+      }
+
+      return 'HTTP ${response.statusCode} em /health';
+    } catch (error) {
+      return error.toString();
+    }
+  }
+
+  Future<void> _startLocalBackend() async {
+    if (_localBackend != null) {
+      return;
+    }
+
+    final projectFile = await _findBackendProject();
+    if (projectFile == null) {
+      throw ApiConnectionException(
+        'Nao encontrei o projeto da API. Abra o app pela pasta '
+        'E:\\Projetos\\Projeto_CRM_Android\\desktop ou inicie a API manualmente.',
+      );
+    }
+
+    _localBackend = await Process.start(
+      'dotnet',
+      ['run', '--project', projectFile.path, '--urls', baseUrl],
+      mode: ProcessStartMode.detachedWithStdio,
+      runInShell: true,
+    );
+
+    _localBackend!.stdout.transform(utf8.decoder).listen((_) {});
+    _localBackend!.stderr.transform(utf8.decoder).listen((_) {});
+    _localBackend!.exitCode.then((_) => _localBackend = null);
+  }
+
+  Future<File?> _findBackendProject() async {
+    final candidates = [
+      '../backend/AutoPartsCrm.Api/AutoPartsCrm.Api.csproj',
+      'backend/AutoPartsCrm.Api/AutoPartsCrm.Api.csproj',
+      '../../backend/AutoPartsCrm.Api/AutoPartsCrm.Api.csproj',
+    ];
+
+    for (final candidate in candidates) {
+      final file = File(candidate).absolute;
+      if (await file.exists()) {
+        return file;
+      }
+    }
+
+    return null;
   }
 
   Future<Map<String, dynamic>> getMap(String path) async {
@@ -101,6 +200,15 @@ class ApiException implements Exception {
   String toString() => 'Erro $statusCode: $message';
 }
 
+class ApiConnectionException implements Exception {
+  ApiConnectionException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class Session {
   const Session({
     required this.userId,
@@ -150,6 +258,7 @@ class _LoginPageState extends State<LoginPage> {
     });
 
     try {
+      await widget.api.ensureAvailable();
       final result = await widget.api.post('/api/auth/login', {
         'email': _email.text,
         'password': _password.text,
@@ -162,10 +271,15 @@ class _LoginPageState extends State<LoginPage> {
               HomeShell(api: widget.api, session: Session.fromJson(result)),
         ),
       );
+    } on ApiConnectionException catch (error) {
+      setState(() => _error = error.message);
+    } on ApiException catch (error) {
+      final message = error.statusCode == 401
+          ? 'Email ou senha invalidos para este ambiente.'
+          : 'A API respondeu com erro: ${error.message}';
+      setState(() => _error = message);
     } catch (error) {
-      setState(
-        () => _error = 'Nao foi possivel entrar. Verifique a API e os dados.',
-      );
+      setState(() => _error = 'Nao foi possivel entrar. Detalhe: $error');
     } finally {
       if (mounted) {
         setState(() => _loading = false);

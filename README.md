@@ -33,7 +33,18 @@ O sistema deve organizar o fluxo de informacoes entre setores, reduzir retrabalh
 - `backend/` - API ASP.NET Core.
 - `desktop/` - aplicacao Flutter Desktop para Windows.
 - `database/` - migracoes e massa de teste PostgreSQL.
+- `scripts/` - scripts auxiliares de desenvolvimento local.
 - `tests/` - area reservada para testes complementares.
+
+## Execucao Local
+
+Para abrir a versao Windows com a API local:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-crm-dev.ps1
+```
+
+O app desktop tambem tenta iniciar a API automaticamente ao entrar, desde que seja aberto pela pasta do projeto e o PostgreSQL esteja disponivel.
 
 ## Principios do Projeto
 

@@ -53,23 +53,33 @@ No emulador Android, o app acessa essa mesma API por:
 
 Essa regra ja foi configurada no `ApiClient`.
 
+Na execucao Windows desktop, o app tenta iniciar a API automaticamente antes do login. No emulador Android isso nao e possivel, entao a API precisa estar aberta no Windows antes de executar o app.
+
+Para iniciar API e app Windows juntos pelo terminal:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File E:\Projetos\Projeto_CRM_Android\scripts\start-crm-dev.ps1
+```
+
 ## Como Rodar
 
-1. Inicie a API:
+1. Garanta que o PostgreSQL esteja aberto.
+
+2. Para Android/emulador, inicie a API:
 
 ```powershell
 dotnet run --project backend\AutoPartsCrm.Api\AutoPartsCrm.Api.csproj --launch-profile http
 ```
 
-2. Abra o app Flutter no Android Studio usando a pasta:
+3. Abra o app Flutter no Android Studio usando a pasta:
 
 ```text
 E:\Projetos\Projeto_CRM_Android\desktop
 ```
 
-3. Selecione o emulador Android.
+4. Selecione o emulador Android ou Windows Desktop.
 
-4. Execute `lib/main.dart`.
+5. Execute `lib/main.dart`.
 
 ## Configuracao no Android Studio
 
