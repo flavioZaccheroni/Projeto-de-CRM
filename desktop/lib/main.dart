@@ -33,7 +33,7 @@ class ApiClient {
   final String baseUrl;
   final HttpClient _client = HttpClient()
     ..badCertificateCallback = (_, _, _) => true;
-  static Process? _localBackend;
+  static bool _localBackendStartRequested = false;
 
   static String _defaultBaseUrl() {
     if (Platform.isAndroid) {
@@ -65,6 +65,7 @@ class ApiClient {
       }
     }
 
+    _localBackendStartRequested = false;
     throw ApiConnectionException(
       'A API foi iniciada, mas nao ficou pronta. Verifique se o PostgreSQL '
       'esta aberto e se o banco autoparts_crm_dev existe. Ultimo erro: '
@@ -100,7 +101,7 @@ class ApiClient {
   }
 
   Future<void> _startLocalBackend() async {
-    if (_localBackend != null) {
+    if (_localBackendStartRequested) {
       return;
     }
 
@@ -112,16 +113,45 @@ class ApiClient {
       );
     }
 
-    _localBackend = await Process.start(
+    _localBackendStartRequested = true;
+
+    if (Platform.isWindows) {
+      await _startLocalBackendHiddenOnWindows(projectFile);
+      return;
+    }
+
+    await Process.start(
       'dotnet',
       ['run', '--project', projectFile.path, '--urls', baseUrl],
-      mode: ProcessStartMode.detachedWithStdio,
+      mode: ProcessStartMode.detached,
       runInShell: true,
     );
+  }
 
-    _localBackend!.stdout.transform(utf8.decoder).listen((_) {});
-    _localBackend!.stderr.transform(utf8.decoder).listen((_) {});
-    _localBackend!.exitCode.then((_) => _localBackend = null);
+  Future<void> _startLocalBackendHiddenOnWindows(File projectFile) async {
+    final script = File(
+      '${Directory.systemTemp.path}\\autoparts_crm_start_api.vbs',
+    );
+    final command =
+        'dotnet run --project "${projectFile.path}" --urls "$baseUrl"';
+
+    await script.writeAsString('''
+Set shell = CreateObject("WScript.Shell")
+shell.Run "${_escapeVbs(command)}", 0, False
+''');
+
+    final result = await Process.run('wscript.exe', [script.path]);
+    if (result.exitCode != 0) {
+      _localBackendStartRequested = false;
+      throw ApiConnectionException(
+        'Nao foi possivel iniciar a API local em modo oculto. '
+        'Detalhe: ${result.stderr}',
+      );
+    }
+  }
+
+  String _escapeVbs(String value) {
+    return value.replaceAll('"', '""');
   }
 
   Future<File?> _findBackendProject() async {
