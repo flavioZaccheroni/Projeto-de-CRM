@@ -40,6 +40,8 @@ O script usa UUIDs e a extensao `uuid-ossp`. Em ambientes onde essa extensao nao
 - `migrations/002_phase1_development_passwords.sql`
 - `migrations/003_phase2_commercial.sql`
 - `migrations/004_phase3_stock_purchases.sql`
+- `migrations/005_phase4_work_orders.sql`
 - `seed/001_sample_data.sql`
 - `seed/002_phase2_sample_data.sql`
 - `seed/003_phase3_sample_data.sql`
+- `seed/004_phase4_sample_data.sql`

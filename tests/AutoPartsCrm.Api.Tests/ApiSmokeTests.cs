@@ -51,6 +51,7 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
     [InlineData("/api/customer-interactions")]
     [InlineData("/api/quotations")]
     [InlineData("/api/sales-orders")]
+    [InlineData("/api/work-orders")]
     [InlineData("/api/stock-balances")]
     [InlineData("/api/stock-movements")]
     [InlineData("/api/purchase-orders")]

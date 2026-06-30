@@ -655,6 +655,237 @@ app.MapPost("/api/sales-orders/{id:guid}/status", async (Guid id, UpdateStatusRe
     return Results.Ok(new { id, request.Status });
 });
 
+app.MapGet("/api/work-orders", async (NpgsqlDataSource db) =>
+{
+    const string sql = """
+        select w.id, w.customer_id, c.name, w.vehicle_id, coalesce(v.plate, ''),
+               w.assigned_to_user_id, coalesce(u.full_name, 'Sem tecnico'), w.status,
+               coalesce(w.problem_description, ''), coalesce(w.technical_notes, ''),
+               w.total_products, w.total_services, w.total_amount, w.opened_at, w.closed_at,
+               count(wi.id)::int,
+               exists(select 1 from sales_orders so where so.work_order_id = w.id) as invoiced
+        from work_orders w
+        join customers c on c.id = w.customer_id
+        left join vehicles v on v.id = w.vehicle_id
+        left join users u on u.id = w.assigned_to_user_id
+        left join work_order_items wi on wi.work_order_id = w.id
+        group by w.id, c.name, v.plate, u.full_name
+        order by w.opened_at desc
+        """;
+
+    return Results.Ok(await Query(db, sql, reader => new WorkOrderDto(
+        reader.GetGuid(0),
+        reader.GetGuid(1),
+        reader.GetString(2),
+        reader.IsDBNull(3) ? null : reader.GetGuid(3),
+        reader.GetString(4),
+        reader.IsDBNull(5) ? null : reader.GetGuid(5),
+        reader.GetString(6),
+        reader.GetString(7),
+        reader.GetString(8),
+        reader.GetString(9),
+        reader.GetDecimal(10),
+        reader.GetDecimal(11),
+        reader.GetDecimal(12),
+        reader.GetFieldValue<DateTimeOffset>(13),
+        reader.IsDBNull(14) ? null : reader.GetFieldValue<DateTimeOffset>(14),
+        reader.GetInt32(15),
+        reader.GetBoolean(16)
+    )));
+});
+
+app.MapPost("/api/work-orders", async (CreateWorkOrderRequest request, NpgsqlDataSource db) =>
+{
+    if (request.Items.Count == 0)
+    {
+        return Results.BadRequest(new { message = "A ordem de servico precisa ter pelo menos um item." });
+    }
+
+    var totals = CalculateTotals(request.Items);
+    await using var connection = await db.OpenConnectionAsync();
+    await using var transaction = await connection.BeginTransactionAsync();
+
+    await using var command = new NpgsqlCommand("""
+        insert into work_orders (
+            customer_id, vehicle_id, quotation_id, opened_by_user_id, assigned_to_user_id,
+            status, problem_description, technical_notes, total_products, total_services, total_amount
+        )
+        values (
+            @customerId, @vehicleId, @quotationId, @userId, @assignedToUserId,
+            'open', @problemDescription, @technicalNotes, @totalProducts, @totalServices, @totalAmount
+        )
+        returning id
+        """, connection, transaction);
+    command.Parameters.AddWithValue("customerId", request.CustomerId);
+    command.Parameters.AddWithValue("vehicleId", request.VehicleId is null ? DBNull.Value : request.VehicleId);
+    command.Parameters.AddWithValue("quotationId", request.QuotationId is null ? DBNull.Value : request.QuotationId);
+    command.Parameters.AddWithValue("userId", request.UserId ?? throw new InvalidOperationException("Usuario obrigatorio."));
+    command.Parameters.AddWithValue("assignedToUserId", request.AssignedToUserId is null ? DBNull.Value : request.AssignedToUserId);
+    command.Parameters.AddWithValue("problemDescription", DbValue(request.ProblemDescription));
+    command.Parameters.AddWithValue("technicalNotes", DbValue(request.TechnicalNotes));
+    command.Parameters.AddWithValue("totalProducts", totals.Products);
+    command.Parameters.AddWithValue("totalServices", totals.Services);
+    command.Parameters.AddWithValue("totalAmount", totals.Amount);
+
+    var id = (Guid)(await command.ExecuteScalarAsync() ?? Guid.Empty);
+
+    foreach (var item in request.Items)
+    {
+        await InsertCommercialItem(connection, transaction, "work_order_items", "work_order_id", id, item);
+    }
+
+    await transaction.CommitAsync();
+    await InsertAudit(db, request.UserId, "work_orders", id, "created", request);
+
+    return Results.Created($"/api/work-orders/{id}", new { id });
+});
+
+app.MapPost("/api/work-orders/{id:guid}/status", async (Guid id, UpdateStatusRequest request, NpgsqlDataSource db) =>
+{
+    var status = request.Status.Trim();
+    if (status is not ("open" or "approved" or "in_progress" or "paused" or "completed" or "cancelled"))
+    {
+        return Results.BadRequest(new { message = "Status de ordem de servico invalido." });
+    }
+
+    await using var connection = await db.OpenConnectionAsync();
+    await using var transaction = await connection.BeginTransactionAsync();
+
+    await using var loadCommand = new NpgsqlCommand("select status from work_orders where id = @id for update", connection, transaction);
+    loadCommand.Parameters.AddWithValue("id", id);
+    var currentStatus = (string?)await loadCommand.ExecuteScalarAsync();
+
+    if (currentStatus is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (status == "completed" && currentStatus != "completed")
+    {
+        var productItems = await LoadWorkOrderProductItems(connection, transaction, id);
+        foreach (var item in productItems)
+        {
+            var currentQuantity = await GetStockQuantity(connection, transaction, item.ProductId);
+            if (currentQuantity < item.Quantity)
+            {
+                return Results.BadRequest(new { message = $"Estoque insuficiente para {item.Description}." });
+            }
+
+            await UpsertStockBalance(connection, transaction, item.ProductId, currentQuantity - item.Quantity);
+            await InsertStockMovement(connection, transaction, item.ProductId, id, request.UserId, "out", item.Quantity, "Consumo em ordem de servico");
+        }
+    }
+
+    await using var updateCommand = new NpgsqlCommand("""
+        update work_orders
+        set status = @status,
+            closed_at = case when @status = 'completed' then coalesce(closed_at, now()) else closed_at end,
+            updated_at = now()
+        where id = @id
+        """, connection, transaction);
+    updateCommand.Parameters.AddWithValue("id", id);
+    updateCommand.Parameters.AddWithValue("status", status);
+    await updateCommand.ExecuteNonQueryAsync();
+
+    await transaction.CommitAsync();
+    await InsertAudit(db, request.UserId, "work_orders", id, "status_updated", request);
+    return Results.Ok(new { id, Status = status });
+});
+
+app.MapPost("/api/work-orders/{id:guid}/invoice", async (Guid id, InvoiceWorkOrderRequest request, NpgsqlDataSource db) =>
+{
+    await using var connection = await db.OpenConnectionAsync();
+    await using var transaction = await connection.BeginTransactionAsync();
+
+    await using var existingCommand = new NpgsqlCommand("select id from sales_orders where work_order_id = @id limit 1", connection, transaction);
+    existingCommand.Parameters.AddWithValue("id", id);
+    var existingValue = await existingCommand.ExecuteScalarAsync();
+    if (existingValue is Guid existingId)
+    {
+        return Results.Conflict(new { message = "Esta ordem de servico ja foi faturada.", salesOrderId = existingId });
+    }
+
+    await using var orderCommand = new NpgsqlCommand("""
+        select customer_id, quotation_id, total_products, total_services, total_amount, status
+        from work_orders
+        where id = @id
+        for update
+        """, connection, transaction);
+    orderCommand.Parameters.AddWithValue("id", id);
+
+    await using var reader = await orderCommand.ExecuteReaderAsync();
+    if (!await reader.ReadAsync())
+    {
+        return Results.NotFound();
+    }
+
+    var customerId = reader.GetGuid(0);
+    var quotationId = reader.IsDBNull(1) ? (Guid?)null : reader.GetGuid(1);
+    var totalProducts = reader.GetDecimal(2);
+    var totalServices = reader.GetDecimal(3);
+    var totalAmount = reader.GetDecimal(4);
+    var currentStatus = reader.GetString(5);
+    await reader.DisposeAsync();
+
+    if (currentStatus != "completed")
+    {
+        var productItems = await LoadWorkOrderProductItems(connection, transaction, id);
+        foreach (var item in productItems)
+        {
+            var currentQuantity = await GetStockQuantity(connection, transaction, item.ProductId);
+            if (currentQuantity < item.Quantity)
+            {
+                return Results.BadRequest(new { message = $"Estoque insuficiente para {item.Description}." });
+            }
+
+            await UpsertStockBalance(connection, transaction, item.ProductId, currentQuantity - item.Quantity);
+            await InsertStockMovement(connection, transaction, item.ProductId, id, request.UserId, "out", item.Quantity, "Consumo em ordem de servico faturada");
+        }
+    }
+
+    await using var insertCommand = new NpgsqlCommand("""
+        insert into sales_orders (
+            customer_id, quotation_id, work_order_id, created_by_user_id, status, notes,
+            total_products, total_services, total_amount
+        )
+        values (
+            @customerId, @quotationId, @workOrderId, @userId, 'invoiced', @notes,
+            @totalProducts, @totalServices, @totalAmount
+        )
+        returning id
+        """, connection, transaction);
+    insertCommand.Parameters.AddWithValue("customerId", customerId);
+    insertCommand.Parameters.AddWithValue("quotationId", quotationId is null ? DBNull.Value : quotationId);
+    insertCommand.Parameters.AddWithValue("workOrderId", id);
+    insertCommand.Parameters.AddWithValue("userId", request.UserId ?? throw new InvalidOperationException("Usuario obrigatorio."));
+    insertCommand.Parameters.AddWithValue("notes", DbValue(request.Notes));
+    insertCommand.Parameters.AddWithValue("totalProducts", totalProducts);
+    insertCommand.Parameters.AddWithValue("totalServices", totalServices);
+    insertCommand.Parameters.AddWithValue("totalAmount", totalAmount);
+    var salesOrderId = (Guid)(await insertCommand.ExecuteScalarAsync() ?? Guid.Empty);
+
+    var items = await LoadWorkOrderItems(connection, transaction, id);
+    foreach (var item in items)
+    {
+        await InsertCommercialItem(connection, transaction, "sales_order_items", "sales_order_id", salesOrderId, item);
+    }
+
+    await using var updateCommand = new NpgsqlCommand("""
+        update work_orders
+        set status = 'completed',
+            closed_at = coalesce(closed_at, now()),
+            updated_at = now()
+        where id = @id
+        """, connection, transaction);
+    updateCommand.Parameters.AddWithValue("id", id);
+    await updateCommand.ExecuteNonQueryAsync();
+
+    await transaction.CommitAsync();
+    await InsertAudit(db, request.UserId, "work_orders", id, "invoiced", new { request.UserId, request.Notes, salesOrderId });
+
+    return Results.Created($"/api/sales-orders/{salesOrderId}", new { id = salesOrderId, workOrderId = id });
+});
+
 app.MapGet("/api/purchase-orders", async (NpgsqlDataSource db) =>
 {
     const string sql = """
@@ -919,6 +1150,58 @@ static async Task InsertCommercialItem(
     await command.ExecuteNonQueryAsync();
 }
 
+static async Task<List<CommercialItemRequest>> LoadWorkOrderItems(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workOrderId)
+{
+    var items = new List<CommercialItemRequest>();
+    await using var command = new NpgsqlCommand("""
+        select item_type, product_id, service_id, description, quantity, unit_price
+        from work_order_items
+        where work_order_id = @workOrderId
+        order by id
+        """, connection, transaction);
+    command.Parameters.AddWithValue("workOrderId", workOrderId);
+
+    await using var reader = await command.ExecuteReaderAsync();
+    while (await reader.ReadAsync())
+    {
+        items.Add(new CommercialItemRequest(
+            reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetGuid(1),
+            reader.IsDBNull(2) ? null : reader.GetGuid(2),
+            reader.GetString(3),
+            reader.GetDecimal(4),
+            reader.GetDecimal(5)
+        ));
+    }
+
+    return items;
+}
+
+static async Task<List<WorkOrderProductItem>> LoadWorkOrderProductItems(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workOrderId)
+{
+    var items = new List<WorkOrderProductItem>();
+    await using var command = new NpgsqlCommand("""
+        select product_id, description, quantity
+        from work_order_items
+        where work_order_id = @workOrderId
+          and item_type = 'product'
+        order by id
+        """, connection, transaction);
+    command.Parameters.AddWithValue("workOrderId", workOrderId);
+
+    await using var reader = await command.ExecuteReaderAsync();
+    while (await reader.ReadAsync())
+    {
+        items.Add(new WorkOrderProductItem(
+            reader.GetGuid(0),
+            reader.GetString(1),
+            reader.GetDecimal(2)
+        ));
+    }
+
+    return items;
+}
+
 static async Task<decimal> GetStockQuantity(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid productId)
 {
     await using var command = new NpgsqlCommand("select coalesce(quantity, 0) from stock_balances where product_id = @productId", connection, transaction);
@@ -1045,6 +1328,10 @@ record QuotationDto(Guid Id, Guid CustomerId, string CustomerName, Guid? Vehicle
 record CreateQuotationRequest(Guid CustomerId, Guid? VehicleId, Guid? UserId, string? Notes, List<CommercialItemRequest> Items);
 record SalesOrderDto(Guid Id, Guid CustomerId, string CustomerName, Guid? QuotationId, string Status, string Notes, decimal TotalProducts, decimal TotalServices, decimal TotalAmount, DateTimeOffset CreatedAt, int ItemsCount);
 record CreateSalesOrderRequest(Guid CustomerId, Guid? QuotationId, Guid? UserId, string? Notes, List<CommercialItemRequest> Items);
+record WorkOrderDto(Guid Id, Guid CustomerId, string CustomerName, Guid? VehicleId, string VehiclePlate, Guid? AssignedToUserId, string TechnicianName, string Status, string ProblemDescription, string TechnicalNotes, decimal TotalProducts, decimal TotalServices, decimal TotalAmount, DateTimeOffset OpenedAt, DateTimeOffset? ClosedAt, int ItemsCount, bool Invoiced);
+record CreateWorkOrderRequest(Guid CustomerId, Guid? VehicleId, Guid? QuotationId, Guid? UserId, Guid? AssignedToUserId, string? ProblemDescription, string? TechnicalNotes, List<CommercialItemRequest> Items);
+record InvoiceWorkOrderRequest(Guid? UserId, string? Notes);
+record WorkOrderProductItem(Guid ProductId, string Description, decimal Quantity);
 record UpdateStatusRequest(string Status, Guid? UserId);
 record PurchaseOrderDto(Guid Id, string Status, string Notes, string ExpectedAt, decimal TotalAmount, DateTimeOffset CreatedAt, string UserName, int ItemsCount);
 record PurchaseOrderItemRequest(Guid ProductId, string Description, decimal Quantity, decimal UnitCost);

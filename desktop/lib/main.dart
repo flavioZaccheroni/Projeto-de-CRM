@@ -406,6 +406,7 @@ class _HomeShellState extends State<HomeShell> {
       InteractionsPage(api: widget.api, session: widget.session),
       QuotationsPage(api: widget.api, session: widget.session),
       SalesOrdersPage(api: widget.api, session: widget.session),
+      WorkOrdersPage(api: widget.api, session: widget.session),
       StockPage(api: widget.api, session: widget.session),
       PurchaseOrdersPage(api: widget.api, session: widget.session),
       UsersPage(api: widget.api, session: widget.session),
@@ -443,6 +444,11 @@ class _HomeShellState extends State<HomeShell> {
                 icon: Icon(Icons.shopping_cart_outlined),
                 selectedIcon: Icon(Icons.shopping_cart),
                 label: Text('Pedidos'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.car_repair_outlined),
+                selectedIcon: Icon(Icons.car_repair),
+                label: Text('OS'),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.warehouse_outlined),
@@ -817,6 +823,154 @@ class _SalesOrdersPageState extends State<SalesOrdersPage> {
     if (saved == true) {
       setState(() => _reload++);
     }
+  }
+}
+
+class WorkOrdersPage extends StatefulWidget {
+  const WorkOrdersPage({required this.api, required this.session, super.key});
+
+  final ApiClient api;
+  final Session session;
+
+  @override
+  State<WorkOrdersPage> createState() => _WorkOrdersPageState();
+}
+
+class _WorkOrdersPageState extends State<WorkOrdersPage> {
+  int _reload = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return DataFuture(
+      key: ValueKey(_reload),
+      future: widget.api.getList('/api/work-orders'),
+      builder: (context, orders) => PageScaffold(
+        title: 'Ordens de servico',
+        action: FilledButton.icon(
+          onPressed: () => _showWorkOrderDialog(context),
+          icon: const Icon(Icons.add),
+          label: const Text('Nova OS'),
+        ),
+        child: Card(
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: BorderSide(color: Theme.of(context).dividerColor),
+          ),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: DataTable(
+              columns: const [
+                DataColumn(label: Text('Cliente')),
+                DataColumn(label: Text('Veiculo')),
+                DataColumn(label: Text('Tecnico')),
+                DataColumn(label: Text('Status')),
+                DataColumn(label: Text('Itens')),
+                DataColumn(label: Text('Total')),
+                DataColumn(label: Text('Faturado')),
+                DataColumn(label: Text('Acoes')),
+              ],
+              rows: [
+                for (final order in orders.cast<Map<String, dynamic>>())
+                  DataRow(
+                    cells: [
+                      DataCell(Text('${order['customerName']}')),
+                      DataCell(Text('${order['vehiclePlate']}')),
+                      DataCell(Text('${order['technicianName']}')),
+                      DataCell(Text(statusLabel(order['status'] as String?))),
+                      DataCell(Text('${order['itemsCount']}')),
+                      DataCell(Text("R\$ ${order['totalAmount']}")),
+                      DataCell(Text(order['invoiced'] == true ? 'Sim' : 'Nao')),
+                      DataCell(
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Iniciar',
+                              onPressed: () => _updateStatus(
+                                order['id'] as String,
+                                'in_progress',
+                              ),
+                              icon: const Icon(Icons.play_arrow),
+                            ),
+                            IconButton(
+                              tooltip: 'Encerrar',
+                              onPressed: () => _updateStatus(
+                                order['id'] as String,
+                                'completed',
+                              ),
+                              icon: const Icon(Icons.check),
+                            ),
+                            IconButton(
+                              tooltip: 'Faturar',
+                              onPressed: order['invoiced'] == true
+                                  ? null
+                                  : () => _invoice(order['id'] as String),
+                              icon: const Icon(Icons.receipt_long),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showWorkOrderDialog(BuildContext context) async {
+    final customers = (await widget.api.getList(
+      '/api/customers',
+    )).cast<Map<String, dynamic>>();
+    final vehicles = (await widget.api.getList(
+      '/api/vehicles',
+    )).cast<Map<String, dynamic>>();
+    final users = (await widget.api.getList(
+      '/api/users',
+    )).cast<Map<String, dynamic>>();
+    final products = (await widget.api.getList(
+      '/api/products',
+    )).cast<Map<String, dynamic>>();
+    final services = (await widget.api.getList(
+      '/api/services',
+    )).cast<Map<String, dynamic>>();
+
+    if (!context.mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => WorkOrderDialog(
+        api: widget.api,
+        session: widget.session,
+        customers: customers,
+        vehicles: vehicles,
+        users: users,
+        products: products,
+        services: services,
+      ),
+    );
+
+    if (saved == true) {
+      setState(() => _reload++);
+    }
+  }
+
+  Future<void> _updateStatus(String id, String status) async {
+    await widget.api.post('/api/work-orders/$id/status', {
+      'status': status,
+      'userId': widget.session.userId,
+    });
+    setState(() => _reload++);
+  }
+
+  Future<void> _invoice(String id) async {
+    await widget.api.post('/api/work-orders/$id/invoice', {
+      'userId': widget.session.userId,
+      'notes': 'Faturado a partir da ordem de servico.',
+    });
+    setState(() => _reload++);
   }
 }
 
@@ -1747,6 +1901,206 @@ class _PurchaseOrderDialogState extends State<PurchaseOrderDialog> {
   }
 }
 
+class WorkOrderDialog extends StatefulWidget {
+  const WorkOrderDialog({
+    required this.api,
+    required this.session,
+    required this.customers,
+    required this.vehicles,
+    required this.users,
+    required this.products,
+    required this.services,
+    super.key,
+  });
+
+  final ApiClient api;
+  final Session session;
+  final List<Map<String, dynamic>> customers;
+  final List<Map<String, dynamic>> vehicles;
+  final List<Map<String, dynamic>> users;
+  final List<Map<String, dynamic>> products;
+  final List<Map<String, dynamic>> services;
+
+  @override
+  State<WorkOrderDialog> createState() => _WorkOrderDialogState();
+}
+
+class _WorkOrderDialogState extends State<WorkOrderDialog> {
+  final _problem = TextEditingController();
+  final _notes = TextEditingController();
+  final _quantity = TextEditingController(text: '1');
+  final _unitPrice = TextEditingController(text: '0');
+  String? _customerId;
+  String? _vehicleId;
+  String? _technicianId;
+  String _itemType = 'product';
+  String? _itemId;
+
+  @override
+  void initState() {
+    super.initState();
+    _customerId = widget.customers.isEmpty
+        ? null
+        : widget.customers.first['id'] as String;
+    _vehicleId = widget.vehicles.isEmpty
+        ? null
+        : widget.vehicles.first['id'] as String;
+    _technicianId = widget.users.isEmpty
+        ? null
+        : widget.users.first['id'] as String;
+    _itemId = widget.products.isEmpty
+        ? null
+        : widget.products.first['id'] as String;
+    _syncPrice();
+  }
+
+  void _syncPrice() {
+    final selected = _selectedItem();
+    if (selected == null) return;
+    _unitPrice.text =
+        '${_itemType == 'product' ? selected['salePrice'] : selected['standardPrice']}';
+  }
+
+  Map<String, dynamic>? _selectedItem() {
+    final source = _itemType == 'product' ? widget.products : widget.services;
+    for (final item in source) {
+      if (item['id'] == _itemId) {
+        return item;
+      }
+    }
+
+    return source.isEmpty ? null : source.first;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final availableItems = _itemType == 'product'
+        ? widget.products
+        : widget.services;
+
+    return FormDialog(
+      title: 'Nova ordem de servico',
+      fields: [
+        DropdownButtonFormField<String>(
+          initialValue: _customerId,
+          items: [
+            for (final customer in widget.customers)
+              DropdownMenuItem(
+                value: customer['id'] as String,
+                child: Text(customer['name'] as String),
+              ),
+          ],
+          onChanged: (value) => setState(() => _customerId = value),
+          decoration: const InputDecoration(labelText: 'Cliente'),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _vehicleId,
+          items: [
+            for (final vehicle in widget.vehicles)
+              DropdownMenuItem(
+                value: vehicle['id'] as String,
+                child: Text('${vehicle['customerName']} - ${vehicle['plate']}'),
+              ),
+          ],
+          onChanged: (value) => setState(() => _vehicleId = value),
+          decoration: const InputDecoration(labelText: 'Veiculo'),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _technicianId,
+          items: [
+            for (final user in widget.users)
+              DropdownMenuItem(
+                value: user['id'] as String,
+                child: Text(user['fullName'] as String),
+              ),
+          ],
+          onChanged: (value) => setState(() => _technicianId = value),
+          decoration: const InputDecoration(labelText: 'Tecnico'),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _itemType,
+          items: const [
+            DropdownMenuItem(value: 'product', child: Text('Peca')),
+            DropdownMenuItem(value: 'service', child: Text('Servico')),
+          ],
+          onChanged: (value) {
+            setState(() {
+              _itemType = value ?? 'product';
+              final source = _itemType == 'product'
+                  ? widget.products
+                  : widget.services;
+              _itemId = source.isEmpty ? null : source.first['id'] as String;
+              _syncPrice();
+            });
+          },
+          decoration: const InputDecoration(labelText: 'Tipo de item'),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _itemId,
+          items: [
+            for (final item in availableItems)
+              DropdownMenuItem(
+                value: item['id'] as String,
+                child: Text(item['name'] as String),
+              ),
+          ],
+          onChanged: (value) {
+            setState(() {
+              _itemId = value;
+              _syncPrice();
+            });
+          },
+          decoration: const InputDecoration(labelText: 'Item'),
+        ),
+        TextField(
+          controller: _quantity,
+          decoration: const InputDecoration(labelText: 'Quantidade'),
+        ),
+        TextField(
+          controller: _unitPrice,
+          decoration: const InputDecoration(labelText: 'Valor unitario'),
+        ),
+        TextField(
+          controller: _problem,
+          decoration: const InputDecoration(labelText: 'Problema relatado'),
+          minLines: 2,
+          maxLines: 3,
+        ),
+        TextField(
+          controller: _notes,
+          decoration: const InputDecoration(labelText: 'Notas tecnicas'),
+          minLines: 2,
+          maxLines: 3,
+        ),
+      ],
+      onSave: () {
+        final selected = _selectedItem();
+        return widget.api.post('/api/work-orders', {
+          'customerId': _customerId,
+          'vehicleId': _vehicleId,
+          'quotationId': null,
+          'userId': widget.session.userId,
+          'assignedToUserId': _technicianId,
+          'problemDescription': _problem.text,
+          'technicalNotes': _notes.text,
+          'items': [
+            {
+              'itemType': _itemType,
+              'productId': _itemType == 'product' ? _itemId : null,
+              'serviceId': _itemType == 'service' ? _itemId : null,
+              'description': selected == null
+                  ? 'Item da ordem'
+                  : selected['name'],
+              'quantity': decimal(_quantity.text),
+              'unitPrice': decimal(_unitPrice.text),
+            },
+          ],
+        });
+      },
+    );
+  }
+}
+
 class CommercialDocumentDialog extends StatefulWidget {
   const CommercialDocumentDialog({
     required this.api,
@@ -2332,6 +2686,9 @@ String statusLabel(String? value) {
     'draft' => 'Rascunho',
     'sent' => 'Enviado',
     'approved' => 'Aprovado',
+    'in_progress' => 'Em execucao',
+    'paused' => 'Pausado',
+    'completed' => 'Encerrado',
     'rejected' => 'Rejeitado',
     'expired' => 'Vencido',
     'confirmed' => 'Confirmado',
