@@ -262,6 +262,8 @@ class _HomeShellState extends State<HomeShell> {
       InteractionsPage(api: widget.api, session: widget.session),
       QuotationsPage(api: widget.api, session: widget.session),
       SalesOrdersPage(api: widget.api, session: widget.session),
+      StockPage(api: widget.api, session: widget.session),
+      PurchaseOrdersPage(api: widget.api, session: widget.session),
       UsersPage(api: widget.api, session: widget.session),
       CustomersPage(api: widget.api, session: widget.session),
       VehiclesPage(api: widget.api, session: widget.session),
@@ -297,6 +299,16 @@ class _HomeShellState extends State<HomeShell> {
                 icon: Icon(Icons.shopping_cart_outlined),
                 selectedIcon: Icon(Icons.shopping_cart),
                 label: Text('Pedidos'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.warehouse_outlined),
+                selectedIcon: Icon(Icons.warehouse),
+                label: Text('Estoque'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.local_shipping_outlined),
+                selectedIcon: Icon(Icons.local_shipping),
+                label: Text('Compras'),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.manage_accounts_outlined),
@@ -406,6 +418,16 @@ class DashboardPage extends StatelessWidget {
               title: 'Pedidos',
               value: '${data['salesOrders']}',
               icon: Icons.shopping_cart,
+            ),
+            SummaryCard(
+              title: 'Compras',
+              value: '${data['purchaseOrders']}',
+              icon: Icons.local_shipping,
+            ),
+            SummaryCard(
+              title: 'Estoque baixo',
+              value: '${data['lowStock']}',
+              icon: Icons.warning_amber,
             ),
             SummaryCard(
               title: 'Ordens abertas',
@@ -645,6 +667,189 @@ class _SalesOrdersPageState extends State<SalesOrdersPage> {
         vehicles: const [],
         products: products,
         services: services,
+      ),
+    );
+
+    if (saved == true) {
+      setState(() => _reload++);
+    }
+  }
+}
+
+class StockPage extends StatefulWidget {
+  const StockPage({required this.api, required this.session, super.key});
+
+  final ApiClient api;
+  final Session session;
+
+  @override
+  State<StockPage> createState() => _StockPageState();
+}
+
+class _StockPageState extends State<StockPage> {
+  int _reload = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return DataFuture(
+      key: ValueKey(_reload),
+      future: Future.wait([
+        widget.api.getList('/api/stock-balances'),
+        widget.api.getList('/api/stock-movements'),
+      ]),
+      builder: (context, data) {
+        final balances = data[0].cast<Map<String, dynamic>>();
+        final movements = data[1].cast<Map<String, dynamic>>();
+
+        return PageScaffold(
+          title: 'Estoque',
+          action: FilledButton.icon(
+            onPressed: () => _showStockMovementDialog(context, balances),
+            icon: const Icon(Icons.add),
+            label: const Text('Movimentar'),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              EntityTable(
+                columns: const [
+                  'Codigo',
+                  'Produto',
+                  'Un.',
+                  'Minimo',
+                  'Saldo',
+                  'Alerta',
+                ],
+                rows: [
+                  for (final item in balances)
+                    [
+                      item['sku'],
+                      item['name'],
+                      item['unit'],
+                      item['minimumStock'],
+                      item['quantity'],
+                      item['belowMinimum'] == true ? 'Baixo' : 'OK',
+                    ],
+                ],
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Ultimas movimentacoes',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 12),
+              EntityTable(
+                columns: const [
+                  'Produto',
+                  'Tipo',
+                  'Qtd.',
+                  'Motivo',
+                  'Usuario',
+                  'Data',
+                ],
+                rows: [
+                  for (final movement in movements)
+                    [
+                      movement['productName'],
+                      movementTypeLabel(movement['movementType'] as String?),
+                      movement['quantity'],
+                      movement['reason'],
+                      movement['userName'],
+                      movement['createdAt'],
+                    ],
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showStockMovementDialog(
+    BuildContext context,
+    List<Map<String, dynamic>> products,
+  ) async {
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => StockMovementDialog(
+        api: widget.api,
+        session: widget.session,
+        products: products,
+      ),
+    );
+
+    if (saved == true) {
+      setState(() => _reload++);
+    }
+  }
+}
+
+class PurchaseOrdersPage extends StatefulWidget {
+  const PurchaseOrdersPage({
+    required this.api,
+    required this.session,
+    super.key,
+  });
+
+  final ApiClient api;
+  final Session session;
+
+  @override
+  State<PurchaseOrdersPage> createState() => _PurchaseOrdersPageState();
+}
+
+class _PurchaseOrdersPageState extends State<PurchaseOrdersPage> {
+  int _reload = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return DataFuture(
+      key: ValueKey(_reload),
+      future: widget.api.getList('/api/purchase-orders'),
+      builder: (context, orders) => PageScaffold(
+        title: 'Compras',
+        action: FilledButton.icon(
+          onPressed: () => _showPurchaseOrderDialog(context),
+          icon: const Icon(Icons.add),
+          label: const Text('Novo pedido'),
+        ),
+        child: EntityTable(
+          columns: const [
+            'Status',
+            'Itens',
+            'Total',
+            'Previsao',
+            'Usuario',
+            'Criado em',
+          ],
+          rows: [
+            for (final order in orders.cast<Map<String, dynamic>>())
+              [
+                statusLabel(order['status'] as String?),
+                order['itemsCount'],
+                "R\$ ${order['totalAmount']}",
+                order['expectedAt'] ?? '',
+                order['userName'],
+                order['createdAt'],
+              ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showPurchaseOrderDialog(BuildContext context) async {
+    final products = (await widget.api.getList(
+      '/api/products',
+    )).cast<Map<String, dynamic>>();
+    if (!context.mounted) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => PurchaseOrderDialog(
+        api: widget.api,
+        session: widget.session,
+        products: products,
       ),
     );
 
@@ -1209,6 +1414,191 @@ class _InteractionDialogState extends State<InteractionDialog> {
         'description': _description.text,
         'status': _status,
       }),
+    );
+  }
+}
+
+class StockMovementDialog extends StatefulWidget {
+  const StockMovementDialog({
+    required this.api,
+    required this.session,
+    required this.products,
+    super.key,
+  });
+
+  final ApiClient api;
+  final Session session;
+  final List<Map<String, dynamic>> products;
+
+  @override
+  State<StockMovementDialog> createState() => _StockMovementDialogState();
+}
+
+class _StockMovementDialogState extends State<StockMovementDialog> {
+  final _quantity = TextEditingController(text: '1');
+  final _reason = TextEditingController(text: 'Ajuste operacional');
+  String? _productId;
+  String _movementType = 'in';
+
+  @override
+  void initState() {
+    super.initState();
+    _productId = widget.products.isEmpty
+        ? null
+        : widget.products.first['productId'] as String;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FormDialog(
+      title: 'Movimentar estoque',
+      fields: [
+        DropdownButtonFormField<String>(
+          initialValue: _productId,
+          items: [
+            for (final product in widget.products)
+              DropdownMenuItem(
+                value: product['productId'] as String,
+                child: Text('${product['sku']} - ${product['name']}'),
+              ),
+          ],
+          onChanged: (value) => setState(() => _productId = value),
+          decoration: const InputDecoration(labelText: 'Produto'),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _movementType,
+          items: const [
+            DropdownMenuItem(value: 'in', child: Text('Entrada')),
+            DropdownMenuItem(value: 'out', child: Text('Saida')),
+            DropdownMenuItem(
+              value: 'adjustment',
+              child: Text('Ajuste de saldo'),
+            ),
+          ],
+          onChanged: (value) => setState(() => _movementType = value ?? 'in'),
+          decoration: const InputDecoration(labelText: 'Tipo'),
+        ),
+        TextField(
+          controller: _quantity,
+          decoration: const InputDecoration(labelText: 'Quantidade'),
+        ),
+        TextField(
+          controller: _reason,
+          decoration: const InputDecoration(labelText: 'Motivo'),
+          minLines: 2,
+          maxLines: 3,
+        ),
+      ],
+      onSave: () => widget.api.post('/api/stock-movements', {
+        'productId': _productId,
+        'userId': widget.session.userId,
+        'movementType': _movementType,
+        'quantity': decimal(_quantity.text),
+        'reason': _reason.text,
+      }),
+    );
+  }
+}
+
+class PurchaseOrderDialog extends StatefulWidget {
+  const PurchaseOrderDialog({
+    required this.api,
+    required this.session,
+    required this.products,
+    super.key,
+  });
+
+  final ApiClient api;
+  final Session session;
+  final List<Map<String, dynamic>> products;
+
+  @override
+  State<PurchaseOrderDialog> createState() => _PurchaseOrderDialogState();
+}
+
+class _PurchaseOrderDialogState extends State<PurchaseOrderDialog> {
+  final _quantity = TextEditingController(text: '1');
+  final _unitCost = TextEditingController(text: '0');
+  final _notes = TextEditingController();
+  String? _productId;
+
+  @override
+  void initState() {
+    super.initState();
+    _productId = widget.products.isEmpty
+        ? null
+        : widget.products.first['id'] as String;
+    _syncCost();
+  }
+
+  void _syncCost() {
+    final product = _selectedProduct();
+    if (product == null) return;
+    _unitCost.text = '${product['costPrice']}';
+  }
+
+  Map<String, dynamic>? _selectedProduct() {
+    for (final product in widget.products) {
+      if (product['id'] == _productId) {
+        return product;
+      }
+    }
+
+    return widget.products.isEmpty ? null : widget.products.first;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FormDialog(
+      title: 'Novo pedido de compra',
+      fields: [
+        DropdownButtonFormField<String>(
+          initialValue: _productId,
+          items: [
+            for (final product in widget.products)
+              DropdownMenuItem(
+                value: product['id'] as String,
+                child: Text('${product['sku']} - ${product['name']}'),
+              ),
+          ],
+          onChanged: (value) {
+            setState(() {
+              _productId = value;
+              _syncCost();
+            });
+          },
+          decoration: const InputDecoration(labelText: 'Produto'),
+        ),
+        TextField(
+          controller: _quantity,
+          decoration: const InputDecoration(labelText: 'Quantidade'),
+        ),
+        TextField(
+          controller: _unitCost,
+          decoration: const InputDecoration(labelText: 'Custo unitario'),
+        ),
+        TextField(
+          controller: _notes,
+          decoration: const InputDecoration(labelText: 'Observacoes'),
+          minLines: 2,
+          maxLines: 3,
+        ),
+      ],
+      onSave: () {
+        final product = _selectedProduct();
+        return widget.api.post('/api/purchase-orders', {
+          'userId': widget.session.userId,
+          'notes': _notes.text,
+          'items': [
+            {
+              'productId': _productId,
+              'description': product == null ? 'Produto' : product['name'],
+              'quantity': decimal(_quantity.text),
+              'unitCost': decimal(_unitCost.text),
+            },
+          ],
+        });
+      },
     );
   }
 }
@@ -1781,6 +2171,15 @@ String interactionLabel(String? value) {
   };
 }
 
+String movementTypeLabel(String? value) {
+  return switch (value) {
+    'in' => 'Entrada',
+    'out' => 'Saida',
+    'adjustment' => 'Ajuste',
+    _ => value ?? '',
+  };
+}
+
 String statusLabel(String? value) {
   return switch (value) {
     'open' => 'Aberto',
@@ -1793,6 +2192,8 @@ String statusLabel(String? value) {
     'expired' => 'Vencido',
     'confirmed' => 'Confirmado',
     'invoiced' => 'Faturado',
+    'ordered' => 'Comprado',
+    'received' => 'Recebido',
     _ => value ?? '',
   };
 }

@@ -94,8 +94,10 @@ app.MapGet("/api/dashboard", async (NpgsqlDataSource db) =>
     var quotations = await Count(db, "quotations");
     var interactions = await Count(db, "customer_interactions");
     var salesOrders = await Count(db, "sales_orders");
+    var purchaseOrders = await Count(db, "purchase_orders");
+    var lowStock = await Count(db, "products p join stock_balances s on s.product_id = p.id", "s.quantity <= p.minimum_stock");
 
-    return Results.Ok(new DashboardDto(customers, products, services, openOrders, users, quotations, interactions, salesOrders));
+    return Results.Ok(new DashboardDto(customers, products, services, openOrders, users, quotations, interactions, salesOrders, purchaseOrders, lowStock));
 });
 
 app.MapGet("/api/roles", async (NpgsqlDataSource db) =>
@@ -308,6 +310,85 @@ app.MapPost("/api/products", async (CreateProductRequest request, NpgsqlDataSour
     await InsertAudit(db, request.UserId, "products", id, "created", request);
 
     return Results.Created($"/api/products/{id}", new { id });
+});
+
+app.MapGet("/api/stock-balances", async (NpgsqlDataSource db) =>
+{
+    const string sql = """
+        select p.id, p.sku, p.name, p.unit, p.minimum_stock, coalesce(s.quantity, 0),
+               case when coalesce(s.quantity, 0) <= p.minimum_stock then true else false end as below_minimum
+        from products p
+        left join stock_balances s on s.product_id = p.id
+        where p.is_active = true
+        order by p.name
+        """;
+
+    return Results.Ok(await Query(db, sql, reader => new StockBalanceDto(
+        reader.GetGuid(0),
+        reader.GetString(1),
+        reader.GetString(2),
+        reader.GetString(3),
+        reader.GetDecimal(4),
+        reader.GetDecimal(5),
+        reader.GetBoolean(6)
+    )));
+});
+
+app.MapGet("/api/stock-movements", async (NpgsqlDataSource db) =>
+{
+    const string sql = """
+        select m.id, m.product_id, p.sku, p.name, coalesce(u.full_name, 'Sistema'),
+               m.movement_type, m.quantity, m.reason, m.created_at
+        from stock_movements m
+        join products p on p.id = m.product_id
+        left join users u on u.id = m.user_id
+        order by m.created_at desc
+        limit 150
+        """;
+
+    return Results.Ok(await Query(db, sql, reader => new StockMovementDto(
+        reader.GetGuid(0),
+        reader.GetGuid(1),
+        reader.GetString(2),
+        reader.GetString(3),
+        reader.GetString(4),
+        reader.GetString(5),
+        reader.GetDecimal(6),
+        reader.GetString(7),
+        reader.GetFieldValue<DateTimeOffset>(8)
+    )));
+});
+
+app.MapPost("/api/stock-movements", async (CreateStockMovementRequest request, NpgsqlDataSource db) =>
+{
+    if (request.Quantity <= 0)
+    {
+        return Results.BadRequest(new { message = "Quantidade deve ser maior que zero." });
+    }
+
+    await using var connection = await db.OpenConnectionAsync();
+    await using var transaction = await connection.BeginTransactionAsync();
+
+    var current = await GetStockQuantity(connection, transaction, request.ProductId);
+    var next = request.MovementType switch
+    {
+        "in" => current + request.Quantity,
+        "out" => current - request.Quantity,
+        "adjustment" => request.Quantity,
+        _ => throw new InvalidOperationException("Tipo de movimento invalido.")
+    };
+
+    if (next < 0)
+    {
+        return Results.BadRequest(new { message = "Estoque nao pode ficar negativo." });
+    }
+
+    await UpsertStockBalance(connection, transaction, request.ProductId, next);
+    await InsertStockMovement(connection, transaction, request.ProductId, null, request.UserId, request.MovementType, request.Quantity, request.Reason);
+    await transaction.CommitAsync();
+    await InsertAudit(db, request.UserId, "stock_movements", request.ProductId, "created", request);
+
+    return Results.Created("/api/stock-movements", new { productId = request.ProductId, quantity = next });
 });
 
 app.MapGet("/api/services", async (NpgsqlDataSource db) =>
@@ -574,6 +655,127 @@ app.MapPost("/api/sales-orders/{id:guid}/status", async (Guid id, UpdateStatusRe
     return Results.Ok(new { id, request.Status });
 });
 
+app.MapGet("/api/purchase-orders", async (NpgsqlDataSource db) =>
+{
+    const string sql = """
+        select po.id, po.status, coalesce(po.notes, ''), coalesce(po.expected_at::text, ''), po.total_amount,
+               po.created_at, coalesce(u.full_name, 'Sistema'), count(pi.id)::int
+        from purchase_orders po
+        join users u on u.id = po.created_by_user_id
+        left join purchase_order_items pi on pi.purchase_order_id = po.id
+        group by po.id, u.full_name
+        order by po.created_at desc
+        """;
+
+    return Results.Ok(await Query(db, sql, reader => new PurchaseOrderDto(
+        reader.GetGuid(0),
+        reader.GetString(1),
+        reader.GetString(2),
+        reader.GetString(3),
+        reader.GetDecimal(4),
+        reader.GetFieldValue<DateTimeOffset>(5),
+        reader.GetString(6),
+        reader.GetInt32(7)
+    )));
+});
+
+app.MapPost("/api/purchase-orders", async (CreatePurchaseOrderRequest request, NpgsqlDataSource db) =>
+{
+    if (request.Items.Count == 0)
+    {
+        return Results.BadRequest(new { message = "Pedido de compra precisa ter pelo menos um item." });
+    }
+
+    var total = request.Items.Sum(item => item.Quantity * item.UnitCost);
+    await using var connection = await db.OpenConnectionAsync();
+    await using var transaction = await connection.BeginTransactionAsync();
+
+    await using var command = new NpgsqlCommand("""
+        insert into purchase_orders (created_by_user_id, status, expected_at, notes, total_amount)
+        values (@userId, 'draft', @expectedAt, @notes, @totalAmount)
+        returning id
+        """, connection, transaction);
+    command.Parameters.AddWithValue("userId", request.UserId ?? throw new InvalidOperationException("Usuario obrigatorio."));
+    command.Parameters.AddWithValue("expectedAt", request.ExpectedAt is null ? DBNull.Value : request.ExpectedAt);
+    command.Parameters.AddWithValue("notes", DbValue(request.Notes));
+    command.Parameters.AddWithValue("totalAmount", total);
+
+    var id = (Guid)(await command.ExecuteScalarAsync() ?? Guid.Empty);
+
+    foreach (var item in request.Items)
+    {
+        await InsertPurchaseOrderItem(connection, transaction, id, item);
+    }
+
+    await transaction.CommitAsync();
+    await InsertAudit(db, request.UserId, "purchase_orders", id, "created", request);
+
+    return Results.Created($"/api/purchase-orders/{id}", new { id });
+});
+
+app.MapPost("/api/purchase-orders/{id:guid}/receive", async (Guid id, ReceivePurchaseOrderRequest request, NpgsqlDataSource db) =>
+{
+    await using var connection = await db.OpenConnectionAsync();
+    await using var transaction = await connection.BeginTransactionAsync();
+
+    var items = await LoadPurchaseItems(connection, transaction, id);
+    if (items.Count == 0)
+    {
+        return Results.NotFound();
+    }
+
+    await using var receiptCommand = new NpgsqlCommand("""
+        insert into purchase_receipts (purchase_order_id, user_id, notes)
+        values (@orderId, @userId, @notes)
+        returning id
+        """, connection, transaction);
+    receiptCommand.Parameters.AddWithValue("orderId", id);
+    receiptCommand.Parameters.AddWithValue("userId", request.UserId ?? throw new InvalidOperationException("Usuario obrigatorio."));
+    receiptCommand.Parameters.AddWithValue("notes", DbValue(request.Notes));
+    var receiptId = (Guid)(await receiptCommand.ExecuteScalarAsync() ?? Guid.Empty);
+
+    foreach (var item in items)
+    {
+        var quantityToReceive = item.Quantity - item.ReceivedQuantity;
+        if (quantityToReceive <= 0)
+        {
+            continue;
+        }
+
+        var current = await GetStockQuantity(connection, transaction, item.ProductId);
+        await UpsertStockBalance(connection, transaction, item.ProductId, current + quantityToReceive);
+        await InsertStockMovement(connection, transaction, item.ProductId, null, request.UserId, "in", quantityToReceive, $"Recebimento do pedido de compra {id}");
+
+        await using var receiptItemCommand = new NpgsqlCommand("""
+            insert into purchase_receipt_items (purchase_receipt_id, purchase_order_item_id, product_id, quantity)
+            values (@receiptId, @itemId, @productId, @quantity)
+            """, connection, transaction);
+        receiptItemCommand.Parameters.AddWithValue("receiptId", receiptId);
+        receiptItemCommand.Parameters.AddWithValue("itemId", item.Id);
+        receiptItemCommand.Parameters.AddWithValue("productId", item.ProductId);
+        receiptItemCommand.Parameters.AddWithValue("quantity", quantityToReceive);
+        await receiptItemCommand.ExecuteNonQueryAsync();
+
+        await using var updateItemCommand = new NpgsqlCommand("""
+            update purchase_order_items
+            set received_quantity = received_quantity + @quantity
+            where id = @itemId
+            """, connection, transaction);
+        updateItemCommand.Parameters.AddWithValue("quantity", quantityToReceive);
+        updateItemCommand.Parameters.AddWithValue("itemId", item.Id);
+        await updateItemCommand.ExecuteNonQueryAsync();
+    }
+
+    await using var updateOrderCommand = new NpgsqlCommand("update purchase_orders set status = 'received', updated_at = now() where id = @id", connection, transaction);
+    updateOrderCommand.Parameters.AddWithValue("id", id);
+    await updateOrderCommand.ExecuteNonQueryAsync();
+
+    await transaction.CommitAsync();
+    await InsertAudit(db, request.UserId, "purchase_orders", id, "received", request);
+
+    return Results.Ok(new { id, receiptId });
+});
+
 app.MapGet("/api/audit-logs", async (NpgsqlDataSource db) =>
 {
     const string sql = """
@@ -717,6 +919,93 @@ static async Task InsertCommercialItem(
     await command.ExecuteNonQueryAsync();
 }
 
+static async Task<decimal> GetStockQuantity(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid productId)
+{
+    await using var command = new NpgsqlCommand("select coalesce(quantity, 0) from stock_balances where product_id = @productId", connection, transaction);
+    command.Parameters.AddWithValue("productId", productId);
+    return Convert.ToDecimal(await command.ExecuteScalarAsync() ?? 0);
+}
+
+static async Task UpsertStockBalance(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid productId, decimal quantity)
+{
+    await using var command = new NpgsqlCommand("""
+        insert into stock_balances (product_id, quantity, updated_at)
+        values (@productId, @quantity, now())
+        on conflict (product_id) do update
+        set quantity = excluded.quantity,
+            updated_at = now()
+        """, connection, transaction);
+    command.Parameters.AddWithValue("productId", productId);
+    command.Parameters.AddWithValue("quantity", quantity);
+    await command.ExecuteNonQueryAsync();
+}
+
+static async Task InsertStockMovement(
+    NpgsqlConnection connection,
+    NpgsqlTransaction transaction,
+    Guid productId,
+    Guid? workOrderId,
+    Guid? userId,
+    string movementType,
+    decimal quantity,
+    string reason)
+{
+    await using var command = new NpgsqlCommand("""
+        insert into stock_movements (product_id, work_order_id, user_id, movement_type, quantity, reason)
+        values (@productId, @workOrderId, @userId, @movementType, @quantity, @reason)
+        """, connection, transaction);
+    command.Parameters.AddWithValue("productId", productId);
+    command.Parameters.AddWithValue("workOrderId", workOrderId is null ? DBNull.Value : workOrderId);
+    command.Parameters.AddWithValue("userId", userId ?? throw new InvalidOperationException("Usuario obrigatorio."));
+    command.Parameters.AddWithValue("movementType", movementType);
+    command.Parameters.AddWithValue("quantity", quantity);
+    command.Parameters.AddWithValue("reason", reason.Trim());
+    await command.ExecuteNonQueryAsync();
+}
+
+static async Task InsertPurchaseOrderItem(
+    NpgsqlConnection connection,
+    NpgsqlTransaction transaction,
+    Guid purchaseOrderId,
+    PurchaseOrderItemRequest item)
+{
+    await using var command = new NpgsqlCommand("""
+        insert into purchase_order_items (purchase_order_id, product_id, description, quantity, unit_cost, total_amount)
+        values (@orderId, @productId, @description, @quantity, @unitCost, @totalAmount)
+        """, connection, transaction);
+    command.Parameters.AddWithValue("orderId", purchaseOrderId);
+    command.Parameters.AddWithValue("productId", item.ProductId);
+    command.Parameters.AddWithValue("description", item.Description.Trim());
+    command.Parameters.AddWithValue("quantity", item.Quantity);
+    command.Parameters.AddWithValue("unitCost", item.UnitCost);
+    command.Parameters.AddWithValue("totalAmount", item.Quantity * item.UnitCost);
+    await command.ExecuteNonQueryAsync();
+}
+
+static async Task<List<PurchaseItemForReceipt>> LoadPurchaseItems(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid purchaseOrderId)
+{
+    var items = new List<PurchaseItemForReceipt>();
+    await using var command = new NpgsqlCommand("""
+        select id, product_id, quantity, received_quantity
+        from purchase_order_items
+        where purchase_order_id = @orderId
+        """, connection, transaction);
+    command.Parameters.AddWithValue("orderId", purchaseOrderId);
+    await using var reader = await command.ExecuteReaderAsync();
+
+    while (await reader.ReadAsync())
+    {
+        items.Add(new PurchaseItemForReceipt(
+            reader.GetGuid(0),
+            reader.GetGuid(1),
+            reader.GetDecimal(2),
+            reader.GetDecimal(3)
+        ));
+    }
+
+    return items;
+}
+
 static object DbValue(string? value) => string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();
 
 static bool VerifyDevelopmentPassword(string storedHash, string password)
@@ -732,7 +1021,7 @@ static bool VerifyDevelopmentPassword(string storedHash, string password)
 record LoginRequest(string Email, string Password);
 record LoginResponse(string Token, CurrentUserDto User);
 record CurrentUserDto(Guid Id, string FullName, string Email, string RoleName, List<string> Permissions);
-record DashboardDto(int Customers, int Products, int Services, int OpenOrders, int Users, int Quotations, int Interactions, int SalesOrders);
+record DashboardDto(int Customers, int Products, int Services, int OpenOrders, int Users, int Quotations, int Interactions, int SalesOrders, int PurchaseOrders, int LowStock);
 record RoleDto(Guid Id, string Name, string Description);
 record PermissionDto(Guid Id, string Code, string Description);
 record UserDto(Guid Id, string FullName, string Email, bool IsActive, Guid RoleId, string RoleName);
@@ -743,6 +1032,9 @@ record VehicleDto(Guid Id, Guid CustomerId, string CustomerName, string Plate, s
 record CreateVehicleRequest(Guid CustomerId, string? Plate, string? Brand, string? Model, int? ModelYear, string? Color, string? Vin, string? Notes, Guid? UserId);
 record ProductDto(Guid Id, string Sku, string Name, string Unit, decimal SalePrice, decimal CostPrice, decimal MinimumStock, decimal Quantity, bool IsActive);
 record CreateProductRequest(string Sku, string Name, string? Description, string? Unit, decimal SalePrice, decimal CostPrice, decimal MinimumStock, decimal InitialStock, Guid? UserId);
+record StockBalanceDto(Guid ProductId, string Sku, string Name, string Unit, decimal MinimumStock, decimal Quantity, bool BelowMinimum);
+record StockMovementDto(Guid Id, Guid ProductId, string Sku, string ProductName, string UserName, string MovementType, decimal Quantity, string Reason, DateTimeOffset CreatedAt);
+record CreateStockMovementRequest(Guid ProductId, Guid? UserId, string MovementType, decimal Quantity, string Reason);
 record ServiceDto(Guid Id, string Code, string Name, string Description, decimal StandardPrice, int? EstimatedMinutes, bool IsActive);
 record CreateServiceRequest(string Code, string Name, string? Description, decimal StandardPrice, int? EstimatedMinutes, Guid? UserId);
 record CustomerInteractionDto(Guid Id, Guid CustomerId, string CustomerName, string UserName, string InteractionType, string Subject, string Description, string Status, DateTimeOffset? NextContactAt, DateTimeOffset CreatedAt);
@@ -754,6 +1046,11 @@ record CreateQuotationRequest(Guid CustomerId, Guid? VehicleId, Guid? UserId, st
 record SalesOrderDto(Guid Id, Guid CustomerId, string CustomerName, Guid? QuotationId, string Status, string Notes, decimal TotalProducts, decimal TotalServices, decimal TotalAmount, DateTimeOffset CreatedAt, int ItemsCount);
 record CreateSalesOrderRequest(Guid CustomerId, Guid? QuotationId, Guid? UserId, string? Notes, List<CommercialItemRequest> Items);
 record UpdateStatusRequest(string Status, Guid? UserId);
+record PurchaseOrderDto(Guid Id, string Status, string Notes, string ExpectedAt, decimal TotalAmount, DateTimeOffset CreatedAt, string UserName, int ItemsCount);
+record PurchaseOrderItemRequest(Guid ProductId, string Description, decimal Quantity, decimal UnitCost);
+record CreatePurchaseOrderRequest(Guid? UserId, DateTime? ExpectedAt, string? Notes, List<PurchaseOrderItemRequest> Items);
+record ReceivePurchaseOrderRequest(Guid? UserId, string? Notes);
+record PurchaseItemForReceipt(Guid Id, Guid ProductId, decimal Quantity, decimal ReceivedQuantity);
 record AuditLogDto(Guid Id, string UserName, string EntityName, Guid? EntityId, string Action, DateTimeOffset CreatedAt);
 
 public partial class Program;

@@ -51,6 +51,9 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
     [InlineData("/api/customer-interactions")]
     [InlineData("/api/quotations")]
     [InlineData("/api/sales-orders")]
+    [InlineData("/api/stock-balances")]
+    [InlineData("/api/stock-movements")]
+    [InlineData("/api/purchase-orders")]
     public async Task CommercialEndpoints_ReturnOk(string endpoint)
     {
         var response = await _client.GetAsync(endpoint);
